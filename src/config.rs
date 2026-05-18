@@ -10,6 +10,9 @@ pub struct Config {
     pub nats_url: String,
     pub ai_worker_url: String,
     pub jwt_secret: String,
+    pub cloudinary_cloud_name: String,
+    pub cloudinary_api_key: Option<String>,
+    pub cloudinary_api_secret: Option<String>,
     pub access_token_ttl_minutes: i64,
     pub refresh_token_ttl_days: i64,
 }
@@ -26,6 +29,12 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:8090".to_string()),
             jwt_secret: env::var("JWT_SECRET")
                 .unwrap_or_else(|_| "dev-only-change-me-before-production".to_string()),
+            cloudinary_cloud_name: env::var("CLOUDINARY_CLOUD_NAME")
+                .ok()
+                .or_else(|| cloud_name_from_url(&env::var("CLOUDINARY_URL").ok()?))
+                .unwrap_or_else(|| "zoohelp-dev".to_string()),
+            cloudinary_api_key: env::var("CLOUDINARY_API_KEY").ok(),
+            cloudinary_api_secret: env::var("CLOUDINARY_API_SECRET").ok(),
             access_token_ttl_minutes: env::var("ACCESS_TOKEN_TTL_MINUTES")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -36,4 +45,11 @@ impl Config {
                 .unwrap_or(30),
         })
     }
+}
+
+fn cloud_name_from_url(value: &str) -> Option<String> {
+    value
+        .rsplit_once('@')
+        .map(|(_, cloud_name)| cloud_name.trim().trim_matches('/').to_string())
+        .filter(|cloud_name| !cloud_name.is_empty())
 }
