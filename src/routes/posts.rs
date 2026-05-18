@@ -1,45 +1,108 @@
-use axum::{extract::Path, Json};
+use axum::{extract::Path, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use crate::{error::ApiError, services::fraud};
+use crate::{
+    domain::{seed_authors, seed_posts, AnimalType, Post, PostType},
+    error::ApiError,
+    services::fraud,
+};
 
 #[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
 pub struct CreatePostRequest {
+    #[validate(length(min = 1, max = 120))]
+    pub name: Option<String>,
+    pub post_type: PostType,
+    pub animal_type: AnimalType,
+    pub breed: Option<String>,
+    pub age: Option<String>,
     #[validate(length(min = 1, max = 1200))]
     pub description: String,
-    pub post_type: String,
-    pub animal_type: String,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-    pub image_urls: Vec<String>,
+    #[validate(length(min = 1, max = 180))]
+    pub location: String,
+    pub neighborhood: Option<String>,
+    pub image: Option<String>,
+    pub urgent: Option<bool>,
+    pub contact: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
-pub struct PostResponse {
-    pub id: String,
+#[serde(rename_all = "camelCase")]
+pub struct CreatePostResponse {
+    pub post: Post,
     pub moderation_status: &'static str,
     pub fraud_risk: u8,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LikeResponse {
+    pub post_id: String,
+    pub liked: bool,
+}
+
 pub async fn create_post(
     Json(payload): Json<CreatePostRequest>,
-) -> Result<Json<PostResponse>, ApiError> {
+) -> Result<(StatusCode, Json<CreatePostResponse>), ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+
     let risk = fraud::score_post_text(&payload.description);
-    Ok(Json(PostResponse {
+    let author = seed_authors()
+        .into_iter()
+        .find(|author| author.id == "u5")
+        .ok_or(ApiError::Internal)?;
+
+    let post = Post {
         id: uuid::Uuid::now_v7().to_string(),
-        moderation_status: "queued",
-        fraud_risk: risk,
-    }))
+        post_type: payload.post_type,
+        animal_type: payload.animal_type,
+        name: payload.name.unwrap_or_else(|| "Publicação".into()),
+        breed: payload.breed.unwrap_or_default(),
+        age: payload.age.unwrap_or_default(),
+        description: payload.description,
+        location: payload.location.clone(),
+        neighborhood: payload.neighborhood.unwrap_or(payload.location),
+        image: payload.image,
+        text_only: false,
+        author,
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        urgent: payload.urgent.unwrap_or(false),
+        created_at: "agora".into(),
+        contact: payload.contact.unwrap_or_default(),
+        tags: payload.tags.unwrap_or_default(),
+    };
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatePostResponse {
+            post,
+            moderation_status: "queued",
+            fraud_risk: risk,
+        }),
+    ))
 }
 
-pub async fn get_post(Path(id): Path<String>) -> Json<PostResponse> {
-    Json(PostResponse {
-        id,
-        moderation_status: "approved",
-        fraud_risk: 0,
-    })
+pub async fn get_post(Path(id): Path<String>) -> Result<Json<Post>, ApiError> {
+    seed_posts()
+        .into_iter()
+        .find(|post| post.id == id)
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+pub async fn toggle_like(Path(id): Path<String>) -> Result<Json<LikeResponse>, ApiError> {
+    if seed_posts().iter().any(|post| post.id == id) {
+        return Ok(Json(LikeResponse {
+            post_id: id,
+            liked: true,
+        }));
+    }
+
+    Err(ApiError::NotFound)
 }
