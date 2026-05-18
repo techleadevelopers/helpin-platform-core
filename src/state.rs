@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::broadcast;
 
-use crate::config::Config;
+use crate::{config::Config, services::notifications::NotificationEngine};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
     pub db: PgPool,
     pub chat_tx: broadcast::Sender<ChatEvent>,
+    pub notifications: NotificationEngine,
     pub rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
@@ -29,6 +30,7 @@ impl AppState {
             config,
             db,
             chat_tx,
+            notifications: NotificationEngine::default(),
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         })
     }
