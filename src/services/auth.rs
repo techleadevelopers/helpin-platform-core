@@ -109,6 +109,9 @@ mod tests {
             nats_url: "nats://localhost:4222".into(),
             ai_worker_url: "http://127.0.0.1:8090".into(),
             jwt_secret: "test-secret".into(),
+            cloudinary_cloud_name: "limpeja".into(),
+            cloudinary_api_key: Some("test-api-key".into()),
+            cloudinary_api_secret: Some("test-api-secret".into()),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
         };
