@@ -36,7 +36,10 @@ CREATE TABLE ong_profiles (
   city text,
   state text,
   location geography(Point, 4326),
-  verified_at timestamptz,`r`n  area_type text,`r`n  contact_phone text,`r`n  created_at timestamptz NOT NULL DEFAULT now()
+  verified_at timestamptz,
+  area_type text,
+  contact_phone text,
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE posts (
@@ -44,11 +47,21 @@ CREATE TABLE posts (
   author_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   post_type post_type NOT NULL,
   animal_type text NOT NULL,
+  name text,
+  breed text,
+  age text,
   title text,
   description text NOT NULL,
   location geography(Point, 4326),
+  location_label text,
   neighborhood text,
+  contact text,
+  tags text[] NOT NULL DEFAULT '{}',
   urgent boolean NOT NULL DEFAULT false,
+  text_only boolean NOT NULL DEFAULT false,
+  likes_count integer NOT NULL DEFAULT 0 CHECK (likes_count >= 0),
+  comments_count integer NOT NULL DEFAULT 0 CHECK (comments_count >= 0),
+  shares_count integer NOT NULL DEFAULT 0 CHECK (shares_count >= 0),
   moderation_status moderation_status NOT NULL DEFAULT 'queued',
   fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100),
   created_at timestamptz NOT NULL DEFAULT now()
@@ -56,16 +69,48 @@ CREATE TABLE posts (
 
 CREATE INDEX posts_location_idx ON posts USING gist(location);
 CREATE INDEX posts_feed_idx ON posts (created_at DESC, post_type, urgent);
+CREATE INDEX posts_tags_idx ON posts USING gin(tags);
 CREATE INDEX ong_profiles_location_idx ON ong_profiles USING gist(location);
+
+CREATE TABLE media_upload_intents (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  provider text NOT NULL DEFAULT 'cloudinary',
+  resource_type text NOT NULL CHECK (resource_type IN ('image', 'video')),
+  object_key text NOT NULL UNIQUE,
+  file_name text NOT NULL,
+  content_type text NOT NULL,
+  size_bytes bigint NOT NULL CHECK (size_bytes > 0),
+  checksum_sha256 text,
+  upload_url text NOT NULL,
+  public_url text NOT NULL,
+  expires_at timestamptz NOT NULL,
+  consumed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX media_upload_intents_user_idx ON media_upload_intents (user_id, created_at DESC);
 
 CREATE TABLE post_media (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  provider text NOT NULL DEFAULT 'cloudinary',
+  resource_type text NOT NULL DEFAULT 'image' CHECK (resource_type IN ('image', 'video')),
   object_key text NOT NULL,
+  public_url text NOT NULL,
   content_type text NOT NULL,
+  width integer CHECK (width IS NULL OR width > 0),
+  height integer CHECK (height IS NULL OR height > 0),
+  size_bytes bigint CHECK (size_bytes IS NULL OR size_bytes > 0),
+  checksum_sha256 text,
+  sort_order smallint NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
   moderation_status moderation_status NOT NULL DEFAULT 'queued',
+  moderation_labels text[] NOT NULL DEFAULT '{}',
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE INDEX post_media_post_idx ON post_media (post_id, sort_order);
+CREATE INDEX post_media_moderation_idx ON post_media (moderation_status, created_at);
 
 CREATE TABLE chat_rooms (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -94,4 +139,3 @@ CREATE TABLE donations (
   status text NOT NULL DEFAULT 'pending',
   created_at timestamptz NOT NULL DEFAULT now()
 );
-
