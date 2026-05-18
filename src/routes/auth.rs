@@ -96,7 +96,7 @@ pub async fn login(
             if !auth_service::verify_password(&payload.password, &record.password_hash) {
                 return Err(ApiError::Unauthorized);
             }
-            issue_auth_response(&state, record).await.map(Json)
+            issue_auth_response(&state, record, None).await.map(Json)
         }
         Ok(None) => Err(ApiError::Unauthorized),
         Err(error) => {
@@ -110,8 +110,15 @@ pub async fn login(
                 .next()
                 .unwrap_or("Você")
                 .to_string();
-            issue_fallback_response(&state, "me", &name, &payload.email, AccountType::Person)
-                .map(Json)
+            issue_fallback_response(
+                &state,
+                "me",
+                &name,
+                &payload.email,
+                AccountType::Person,
+                None,
+            )
+            .map(Json)
         }
     }
 }
@@ -139,7 +146,9 @@ pub async fn register(
     validate_ong_payload(&payload, &account_type)?;
 
     match insert_user_with_optional_ong(&state, &payload, &account_type, &password_hash).await {
-        Ok((record, ong_profile)) => issue_auth_response(&state, record, ong_profile).await.map(Json),
+        Ok((record, ong_profile)) => issue_auth_response(&state, record, ong_profile)
+            .await
+            .map(Json),
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
             Err(ApiError::Conflict("email already registered".into()))
         }
@@ -148,8 +157,15 @@ pub async fn register(
                 ?error,
                 "database register path unavailable; using dev fallback"
             );
-            issue_fallback_response(&state, "me", &payload.name, &payload.email, account_type)
-                .map(Json)
+            issue_fallback_response(
+                &state,
+                "me",
+                &payload.name,
+                &payload.email,
+                account_type.clone(),
+                fallback_ong_record(&payload, &account_type),
+            )
+            .map(Json)
         }
     }
 }
@@ -311,6 +327,7 @@ fn issue_fallback_response(
     name: &str,
     email: &str,
     account_type: AccountType,
+    ong_record: Option<OngRecord>,
 ) -> Result<AuthResponse, ApiError> {
     let access_token =
         auth_service::issue_access_token(&state.config, id, email, account_type.clone()).map_err(
@@ -325,7 +342,7 @@ fn issue_fallback_response(
         email,
         account_type,
         false,
-        None,
+        ong_record,
         access_token,
         auth_service::new_refresh_token(),
     ))
@@ -369,19 +386,28 @@ fn auth_response(
     }
 }
 
-fn validate_ong_payload(payload: &RegisterRequest, account_type: &AccountType) -> Result<(), ApiError> {
+fn validate_ong_payload(
+    payload: &RegisterRequest,
+    account_type: &AccountType,
+) -> Result<(), ApiError> {
     if !matches!(account_type, AccountType::Ong) {
         return Ok(());
     }
 
     if payload.ong_type.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(ApiError::Validation("ongType is required for ONG accounts".into()));
+        return Err(ApiError::Validation(
+            "ongType is required for ONG accounts".into(),
+        ));
     }
     if payload.phone.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(ApiError::Validation("phone is required for ONG accounts".into()));
+        return Err(ApiError::Validation(
+            "phone is required for ONG accounts".into(),
+        ));
     }
     if payload.city.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(ApiError::Validation("city is required for ONG accounts".into()));
+        return Err(ApiError::Validation(
+            "city is required for ONG accounts".into(),
+        ));
     }
     if payload.state.as_deref().unwrap_or("").trim().len() != 2 {
         return Err(ApiError::Validation("state must be a 2-letter UF".into()));
@@ -389,7 +415,9 @@ fn validate_ong_payload(payload: &RegisterRequest, account_type: &AccountType) -
     if let Some(cnpj) = &payload.cnpj {
         let digits = cnpj.chars().filter(|ch| ch.is_ascii_digit()).count();
         if digits != 14 {
-            return Err(ApiError::Validation("cnpj must contain 14 digits when provided".into()));
+            return Err(ApiError::Validation(
+                "cnpj must contain 14 digits when provided".into(),
+            ));
         }
     }
 
@@ -404,4 +432,15 @@ fn default_mission(ong_type: Option<&str>) -> &'static str {
         Some("welfare") => "Bem-estar animal e proteção comunitária.",
         _ => "Proteção animal e apoio à comunidade.",
     }
+}
+
+fn fallback_ong_record(payload: &RegisterRequest, account_type: &AccountType) -> Option<OngRecord> {
+    matches!(account_type, AccountType::Ong).then(|| OngRecord {
+        legal_name: payload.name.clone(),
+        ong_type: payload.ong_type.clone(),
+        cnpj: payload.cnpj.clone(),
+        phone: payload.phone.clone(),
+        city: payload.city.clone(),
+        state: payload.state.clone(),
+    })
 }
