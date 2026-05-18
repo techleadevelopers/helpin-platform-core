@@ -246,7 +246,6 @@ pub async fn create_comment(
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
-    let _ = payload.details.as_deref();
 
     if !seed_posts().iter().any(|post| post.id == id) {
         return Err(ApiError::NotFound);
@@ -270,6 +269,7 @@ pub async fn report_post(
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    let _ = payload.details.as_deref();
 
     if !seed_posts().iter().any(|post| post.id == id) {
         return Err(ApiError::NotFound);
