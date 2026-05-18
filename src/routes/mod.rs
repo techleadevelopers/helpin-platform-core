@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 
@@ -26,10 +26,17 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/register", post(auth::register))
+        .route(
+            "/v1/auth/password-reset",
+            post(auth::request_password_reset),
+        )
+        .route("/v1/me", delete(auth::delete_account))
         .route("/v1/feed", get(feed::list_feed))
         .route("/v1/posts", post(posts::create_post))
         .route("/v1/posts/:id", get(posts::get_post))
         .route("/v1/posts/:id/like", post(posts::toggle_like))
+        .route("/v1/posts/:id/comments", post(posts::create_comment))
+        .route("/v1/posts/:id/report", post(posts::report_post))
         .route(
             "/v1/media/upload-intents",
             post(media::create_upload_intent),
