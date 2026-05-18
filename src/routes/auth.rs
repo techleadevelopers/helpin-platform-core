@@ -65,6 +65,17 @@ pub struct AuthResponse {
     pub token_type: &'static str,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+pub struct PasswordResetRequest {
+    #[validate(email)]
+    pub email: String,
+}
+
+#[derive(Serialize)]
+pub struct ActionQueuedResponse {
+    pub status: &'static str,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OngRegistrationProfile {
@@ -168,6 +179,20 @@ pub async fn register(
             .map(Json)
         }
     }
+}
+
+pub async fn request_password_reset(
+    Json(payload): Json<PasswordResetRequest>,
+) -> Result<Json<ActionQueuedResponse>, ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+    let _ = payload.email;
+    Ok(Json(ActionQueuedResponse { status: "queued" }))
+}
+
+pub async fn delete_account() -> Json<ActionQueuedResponse> {
+    Json(ActionQueuedResponse { status: "deleted" })
 }
 
 #[derive(Debug)]
