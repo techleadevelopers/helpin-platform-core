@@ -6,6 +6,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod domain;
 mod error;
 mod routes;
 mod services;
