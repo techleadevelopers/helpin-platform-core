@@ -1,4 +1,4 @@
-﻿# ZooHelp Hybrid Core Platform
+﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779070389/image-removebg-preview_lcwchk.png" alt="ZooHelp Logo" width="38" align="center"> ZooHelp Hybrid Core Platform
 
 ### Enterprise-Grade Global Animal Rescue Infrastructure
 
