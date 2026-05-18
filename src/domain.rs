@@ -46,6 +46,18 @@ pub struct Author {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PostMedia {
+    pub id: String,
+    pub url: String,
+    pub content_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub size_bytes: Option<u64>,
+    pub moderation_status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Post {
     pub id: String,
     #[serde(rename = "type")]
@@ -58,6 +70,7 @@ pub struct Post {
     pub location: String,
     pub neighborhood: String,
     pub image: Option<String>,
+    pub images: Vec<PostMedia>,
     pub text_only: bool,
     pub author: Author,
     pub likes: u32,
@@ -375,6 +388,7 @@ fn post(
         location: location.into(),
         neighborhood: neighborhood.into(),
         image: None,
+        images: Vec::new(),
         text_only: false,
         author,
         likes,
