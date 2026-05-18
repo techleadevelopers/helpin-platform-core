@@ -163,7 +163,7 @@ fn build_ongs() -> Vec<Ong> {
             "o1",
             "Instituto Amigos dos Animais",
             "IAA",
-            "Maior rede de proteÃ§Ã£o animal do Brasil, com atuaÃ§Ã£o nacional.",
+            "Maior rede de proteção animal do Brasil, com atuação nacional.",
             "Vila Mariana, SÃ£o Paulo, SP",
             "SÃ£o Paulo",
             "SP",
@@ -171,13 +171,13 @@ fn build_ongs() -> Vec<Ong> {
             87,
             9430,
             "(11) 99999-0001",
-            "AdoÃ§Ã£o responsÃ¡vel e resgate urbano",
+            "Adoção responsÃ¡vel e resgate urbano",
         ),
         ong(
             "o2",
             "ONG Patinhas Felizes",
             "Patinhas",
-            "Especializada em resgate e reabilitaÃ§Ã£o de animais vÃ­timas de maus-tratos.",
+            "Especializada em resgate e reabilitação de animais vÃ­timas de maus-tratos.",
             "CambuÃ­, Campinas, SP",
             "Campinas",
             "SP",
@@ -185,7 +185,7 @@ fn build_ongs() -> Vec<Ong> {
             34,
             3210,
             "(19) 98888-0002",
-            "Combate a maus-tratos e adoÃ§Ã£o",
+            "Combate a maus-tratos e adoção",
         ),
         ong(
             "o3",
@@ -219,7 +219,7 @@ fn build_ongs() -> Vec<Ong> {
             "o5",
             "Resgate Animal Brasil",
             "RAB",
-            "Atua em emergÃªncias e desastres naturais.",
+            "Atua em emergências e desastres naturais.",
             "Centro, Rio de Janeiro, RJ",
             "Rio de Janeiro",
             "RJ",
@@ -227,13 +227,13 @@ fn build_ongs() -> Vec<Ong> {
             22,
             4100,
             "(21) 95555-0005",
-            "Resgate em emergÃªncias e desastres",
+            "Resgate em emergências e desastres",
         ),
         ong(
             "o6",
             "Fundo Animal BR",
             "FABR",
-            "Conecta doadores a ONGs verificadas com transparÃªncia.",
+            "Conecta doadores a ONGs verificadas com transparência.",
             "Pinheiros, SÃ£o Paulo, SP",
             "SÃ£o Paulo",
             "SP",
@@ -241,7 +241,7 @@ fn build_ongs() -> Vec<Ong> {
             0,
             0,
             "(11) 94444-0006",
-            "CaptaÃ§Ã£o e distribuiÃ§Ã£o de recursos",
+            "Captação e distribuição de recursos",
         ),
     ]
 }
@@ -250,11 +250,11 @@ fn build_posts() -> Vec<Post> {
     let authors = seed_authors();
     vec![
         post("1", PostType::Adoption, AnimalType::Dog, "Mel", "Vira-lata Caramelo", "2 anos", "Mel Ã© dÃ³cil, vacinada, castrada e busca um lar cheio de amor.", "SÃ£o Paulo, SP", "Vila Mariana", authors[0].clone(), 127, 23, 45, false, "2h atrÃ¡s", "(11) 99999-0001", &["vacinada", "castrada", "dÃ³cil"], -23.5898, -46.6348),
-        post("2", PostType::Emergency, AnimalType::Cat, "Sem nome", "Gatinho tigrado", "Estimado 3 meses", "Gatinho encontrado ferido na Av. Paulista. Precisa de atendimento veterinÃ¡rio urgente.", "SÃ£o Paulo, SP", "Bela Vista", authors[1].clone(), 340, 67, 210, true, "45min atrÃ¡s", "(11) 98888-0002", &["emergÃªncia", "ferido"], -23.5614, -46.6559),
+        post("2", PostType::Emergency, AnimalType::Cat, "Sem nome", "Gatinho tigrado", "Estimado 3 meses", "Gatinho encontrado ferido na Av. Paulista. Precisa de atendimento veterinÃ¡rio urgente.", "SÃ£o Paulo, SP", "Bela Vista", authors[1].clone(), 340, 67, 210, true, "45min atrÃ¡s", "(11) 98888-0002", &["emergência", "ferido"], -23.5614, -46.6559),
         post("3", PostType::Lost, AnimalType::Dog, "Thor", "Golden Retriever", "4 anos", "Thor fugiu no Parque Ibirapuera. Tem coleira azul e microchip.", "SÃ£o Paulo, SP", "Ibirapuera", authors[4].clone(), 892, 134, 567, true, "1 dia atrÃ¡s", "(11) 97777-0003", &["perdido", "recompensa"], -23.5874, -46.6576),
-        post("4", PostType::Found, AnimalType::Cat, "Desconhecido", "SiamÃªs", "Adulto", "Gato siamÃªs encontrado no Jardins, seguro e bem alimentado.", "SÃ£o Paulo, SP", "Jardins", authors[4].clone(), 56, 12, 34, false, "3h atrÃ¡s", "(11) 96666-0004", &["encontrado", "siamÃªs"], -23.5674, -46.6694),
+        post("4", PostType::Found, AnimalType::Cat, "Desconhecido", "Siamês", "Adulto", "Gato siamês encontrado no Jardins, seguro e bem alimentado.", "SÃ£o Paulo, SP", "Jardins", authors[4].clone(), 56, 12, 34, false, "3h atrÃ¡s", "(11) 96666-0004", &["encontrado", "siamês"], -23.5674, -46.6694),
         post("5", PostType::Adoption, AnimalType::Dog, "Pipoca", "Poodle mix", "1 ano", "Pipoca Ã© alegre, brincalhÃ£o, vacinado e pronto para um novo lar.", "Campinas, SP", "CambuÃ­", authors[2].clone(), 203, 41, 88, false, "5h atrÃ¡s", "(19) 95555-0005", &["vacinado", "resgatado"], -22.9056, -47.0608),
-        post("6", PostType::Campaign, AnimalType::Other, "Campanha RaÃ§Ã£o SolidÃ¡ria", "Todos os animais", "VÃ¡rios", "Abrigo com estoque crÃ­tico de raÃ§Ã£o para 85 animais.", "SÃ£o Paulo, SP", "Mooca", authors[5].clone(), 412, 78, 305, false, "1 dia atrÃ¡s", "(11) 94444-0006", &["campanha", "doaÃ§Ã£o", "raÃ§Ã£o"], -23.5599, -46.5978),
+        post("6", PostType::Campaign, AnimalType::Other, "Campanha Ração SolidÃ¡ria", "Todos os animais", "VÃ¡rios", "Abrigo com estoque crÃ­tico de ração para 85 animais.", "SÃ£o Paulo, SP", "Mooca", authors[5].clone(), 412, 78, 305, false, "1 dia atrÃ¡s", "(11) 94444-0006", &["campanha", "doação", "ração"], -23.5599, -46.5978),
         post("post1", PostType::Post, AnimalType::Dog, "Dica de hoje", "", "", "CÃ£es precisam de Ã¡gua fresca disponÃ­vel o dia todo.", "SÃ£o Paulo, SP", "Pinheiros", authors[3].clone(), 284, 37, 91, false, "1h atrÃ¡s", "", &["dica", "saÃºde"], -23.5663, -46.7017),
     ]
 }
@@ -269,7 +269,7 @@ fn build_conversations() -> Vec<ChatConversation> {
             "OlÃ¡! Tenho interesse em adotar a Mel.",
             "14:32",
             2,
-            "Mel - AdoÃ§Ã£o",
+            "Mel - Adoção",
         ),
         conversation(
             "c2",
@@ -284,10 +284,10 @@ fn build_conversations() -> Vec<ChatConversation> {
             "c3",
             "6",
             authors[5].clone(),
-            "Quero contribuir com raÃ§Ã£o. Como faÃ§o?",
+            "Quero contribuir com ração. Como faÃ§o?",
             "Ontem",
             1,
-            "Campanha RaÃ§Ã£o SolidÃ¡ria",
+            "Campanha Ração SolidÃ¡ria",
         ),
     ]
 }
