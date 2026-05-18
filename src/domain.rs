@@ -98,6 +98,7 @@ pub struct ChatConversation {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub id: String,
     pub sender_id: String,
