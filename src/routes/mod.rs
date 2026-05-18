@@ -13,6 +13,7 @@ mod feed;
 mod geo;
 mod health;
 mod marketplace;
+mod media;
 mod notifications;
 mod ongs;
 mod posts;
@@ -29,6 +30,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/posts", post(posts::create_post))
         .route("/v1/posts/:id", get(posts::get_post))
         .route("/v1/posts/:id/like", post(posts::toggle_like))
+        .route(
+            "/v1/media/upload-intents",
+            post(media::create_upload_intent),
+        )
         .route("/v1/chat/rooms", get(chat::list_rooms))
         .route("/v1/chat/rooms/:id", get(chat::get_room))
         .route(
@@ -69,6 +74,9 @@ mod tests {
             nats_url: "nats://localhost:4222".into(),
             ai_worker_url: "http://127.0.0.1:8090".into(),
             jwt_secret: "test-secret".into(),
+            cloudinary_cloud_name: "limpeja".into(),
+            cloudinary_api_key: Some("test-api-key".into()),
+            cloudinary_api_secret: Some("test-api-secret".into()),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
         };
@@ -155,6 +163,80 @@ mod tests {
         let (status, _body) = request_json(app, request).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_post_accepts_frontend_media_contract() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/posts")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "name": "Mel",
+                    "postType": "adoption",
+                    "animalType": "dog",
+                    "description": "Animal vacinado para adocao responsavel.",
+                    "location": "Sao Paulo, SP",
+                    "neighborhood": "Vila Mariana",
+                    "images": [{
+                        "objectKey": "posts/test/mel.webp",
+                        "publicUrl": "https://cdn.zoohelp.local/posts/test/mel.webp",
+                        "contentType": "image/webp",
+                        "width": 1080,
+                        "height": 1080,
+                        "sizeBytes": 320000
+                    }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (status, body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            body["post"]["image"],
+            "https://cdn.zoohelp.local/posts/test/mel.webp"
+        );
+        assert_eq!(body["post"]["images"][0]["contentType"], "image/webp");
+        assert_eq!(body["media"][0]["moderationStatus"], "queued");
+    }
+
+    #[tokio::test]
+    async fn media_upload_intent_validates_image_contract() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/media/upload-intents")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "fileName": "resgate.webp",
+                    "contentType": "image/webp",
+                    "sizeBytes": 420000
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (status, body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body["objectKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("zoohelp/posts/image/"));
+        assert!(body["uploadUrl"]
+            .as_str()
+            .unwrap()
+            .contains("api.cloudinary.com"));
+        assert_eq!(body["provider"], "cloudinary");
+        assert_eq!(body["cloudinary"]["cloudName"], "limpeja");
+        assert_eq!(body["cloudinary"]["apiKey"], "test-api-key");
+        assert!(body["cloudinary"]["signature"].as_str().unwrap().len() >= 40);
+        assert_eq!(body["maxSizeBytes"], 10 * 1024 * 1024);
     }
 
     #[tokio::test]
