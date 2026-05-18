@@ -76,6 +76,8 @@ pub async fn create_post(
         created_at: "agora".into(),
         contact: payload.contact.unwrap_or_default(),
         tags: payload.tags.unwrap_or_default(),
+        latitude: -23.5505,
+        longitude: -46.6333,
     };
 
     Ok((
