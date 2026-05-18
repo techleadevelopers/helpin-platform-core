@@ -1,5 +1,7 @@
 ﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp - Help the animals near you.
 
+> Helping vulnerable animals has always meant a lot to me, and seeing technology used to create real-world compassion, rescue, and community impact is something I genuinely respect.
+
 ![Rust](https://img.shields.io/badge/Rust-Core_Backend-orange?style=for-the-badge&logo=rust)
 ![Python](https://img.shields.io/badge/Python-AI_Workers-blue?style=for-the-badge&logo=python)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Database-blue?style=for-the-badge&logo=postgresql)
