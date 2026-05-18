@@ -9,6 +9,12 @@ use serde::Serialize;
 pub enum ApiError {
     #[error("validation error: {0}")]
     Validation(String),
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("too many requests")]
+    TooManyRequests,
     #[error("not found")]
     NotFound,
     #[error("internal error")]
@@ -25,6 +31,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {
             ApiError::Validation(_) => StatusCode::BAD_REQUEST,
+            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
