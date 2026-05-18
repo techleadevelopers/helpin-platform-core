@@ -1,4 +1,11 @@
+﻿use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
+
+static AUTHORS: LazyLock<Vec<Author>> = LazyLock::new(build_authors);
+static ONGS: LazyLock<Vec<Ong>> = LazyLock::new(build_ongs);
+static POSTS: LazyLock<Vec<Post>> = LazyLock::new(build_posts);
+static CONVERSATIONS: LazyLock<Vec<ChatConversation>> = LazyLock::new(build_conversations);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -60,6 +67,10 @@ pub struct Post {
     pub created_at: String,
     pub contact: String,
     pub tags: Vec<String>,
+    #[serde(skip_serializing)]
+    pub latitude: f64,
+    #[serde(skip_serializing)]
+    pub longitude: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -107,79 +118,102 @@ pub struct ChatMessage {
 }
 
 pub fn seed_authors() -> Vec<Author> {
+    AUTHORS.clone()
+}
+
+pub fn seed_ongs() -> Vec<Ong> {
+    ONGS.clone()
+}
+
+pub fn seed_posts() -> Vec<Post> {
+    POSTS.clone()
+}
+
+pub fn post_coordinates(index: usize) -> (f64, f64) {
+    POSTS
+        .get(index)
+        .map(|post| (post.latitude, post.longitude))
+        .unwrap_or((-23.5505, -46.6333))
+}
+
+pub fn seed_conversations() -> Vec<ChatConversation> {
+    CONVERSATIONS.clone()
+}
+
+fn build_authors() -> Vec<Author> {
     vec![
         author("u1", "Instituto Amigos dos Animais", true, AccountType::Ong),
         author("u2", "Protetora Fernanda Lima", true, AccountType::Person),
         author("u3", "ONG Patinhas Felizes", true, AccountType::Ong),
-        author("u4", "Dr. Carlos Veterinário", true, AccountType::Vet),
+        author("u4", "Dr. Carlos VeterinÃ¡rio", true, AccountType::Vet),
         author("u5", "Mariana Santos", false, AccountType::Person),
         author("u6", "Abrigo Municipal SP", true, AccountType::Ong),
     ]
 }
 
-pub fn seed_ongs() -> Vec<Ong> {
+fn build_ongs() -> Vec<Ong> {
     vec![
         ong(
             "o1",
             "Instituto Amigos dos Animais",
             "IAA",
-            "Maior rede de proteção animal do Brasil, com atuação nacional.",
-            "Vila Mariana, São Paulo, SP",
-            "São Paulo",
+            "Maior rede de proteÃ§Ã£o animal do Brasil, com atuaÃ§Ã£o nacional.",
+            "Vila Mariana, SÃ£o Paulo, SP",
+            "SÃ£o Paulo",
             "SP",
             15240,
             87,
             9430,
             "(11) 99999-0001",
-            "Adoção responsável e resgate urbano",
+            "AdoÃ§Ã£o responsÃ¡vel e resgate urbano",
         ),
         ong(
             "o2",
             "ONG Patinhas Felizes",
             "Patinhas",
-            "Especializada em resgate e reabilitação de animais vítimas de maus-tratos.",
-            "Cambuí, Campinas, SP",
+            "Especializada em resgate e reabilitaÃ§Ã£o de animais vÃ­timas de maus-tratos.",
+            "CambuÃ­, Campinas, SP",
             "Campinas",
             "SP",
             4780,
             34,
             3210,
             "(19) 98888-0002",
-            "Combate a maus-tratos e adoção",
+            "Combate a maus-tratos e adoÃ§Ã£o",
         ),
         ong(
             "o3",
             "Abrigo Municipal SP",
             "AMSP",
-            "Abrigo público com suporte veterinário completo.",
-            "Mooca, São Paulo, SP",
-            "São Paulo",
+            "Abrigo pÃºblico com suporte veterinÃ¡rio completo.",
+            "Mooca, SÃ£o Paulo, SP",
+            "SÃ£o Paulo",
             "SP",
             32100,
             198,
             27600,
             "(11) 97777-0003",
-            "Bem-estar animal público",
+            "Bem-estar animal pÃºblico",
         ),
         ong(
             "o4",
-            "Clínica Vet Solidária",
+            "ClÃ­nica Vet SolidÃ¡ria",
             "VetSol",
-            "Rede de clínicas que atende animais de rua e famílias vulneráveis.",
-            "Lapa, São Paulo, SP",
-            "São Paulo",
+            "Rede de clÃ­nicas que atende animais de rua e famÃ­lias vulnerÃ¡veis.",
+            "Lapa, SÃ£o Paulo, SP",
+            "SÃ£o Paulo",
             "SP",
             8900,
             55,
             1200,
             "(11) 96666-0004",
-            "Saúde e bem-estar veterinário",
+            "SaÃºde e bem-estar veterinÃ¡rio",
         ),
         ong(
             "o5",
             "Resgate Animal Brasil",
             "RAB",
-            "Atua em emergências e desastres naturais.",
+            "Atua em emergÃªncias e desastres naturais.",
             "Centro, Rio de Janeiro, RJ",
             "Rio de Janeiro",
             "RJ",
@@ -187,49 +221,49 @@ pub fn seed_ongs() -> Vec<Ong> {
             22,
             4100,
             "(21) 95555-0005",
-            "Resgate em emergências e desastres",
+            "Resgate em emergÃªncias e desastres",
         ),
         ong(
             "o6",
             "Fundo Animal BR",
             "FABR",
-            "Conecta doadores a ONGs verificadas com transparência.",
-            "Pinheiros, São Paulo, SP",
-            "São Paulo",
+            "Conecta doadores a ONGs verificadas com transparÃªncia.",
+            "Pinheiros, SÃ£o Paulo, SP",
+            "SÃ£o Paulo",
             "SP",
             0,
             0,
             0,
             "(11) 94444-0006",
-            "Captação e distribuição de recursos",
+            "CaptaÃ§Ã£o e distribuiÃ§Ã£o de recursos",
         ),
     ]
 }
 
-pub fn seed_posts() -> Vec<Post> {
+fn build_posts() -> Vec<Post> {
     let authors = seed_authors();
     vec![
-        post("1", PostType::Adoption, AnimalType::Dog, "Mel", "Vira-lata Caramelo", "2 anos", "Mel é dócil, vacinada, castrada e busca um lar cheio de amor.", "São Paulo, SP", "Vila Mariana", authors[0].clone(), 127, 23, 45, false, "2h atrás", "(11) 99999-0001", &["vacinada", "castrada", "dócil"]),
-        post("2", PostType::Emergency, AnimalType::Cat, "Sem nome", "Gatinho tigrado", "Estimado 3 meses", "Gatinho encontrado ferido na Av. Paulista. Precisa de atendimento veterinário urgente.", "São Paulo, SP", "Bela Vista", authors[1].clone(), 340, 67, 210, true, "45min atrás", "(11) 98888-0002", &["emergência", "ferido"]),
-        post("3", PostType::Lost, AnimalType::Dog, "Thor", "Golden Retriever", "4 anos", "Thor fugiu no Parque Ibirapuera. Tem coleira azul e microchip.", "São Paulo, SP", "Ibirapuera", authors[4].clone(), 892, 134, 567, true, "1 dia atrás", "(11) 97777-0003", &["perdido", "recompensa"]),
-        post("4", PostType::Found, AnimalType::Cat, "Desconhecido", "Siamês", "Adulto", "Gato siamês encontrado no Jardins, seguro e bem alimentado.", "São Paulo, SP", "Jardins", authors[4].clone(), 56, 12, 34, false, "3h atrás", "(11) 96666-0004", &["encontrado", "siamês"]),
-        post("5", PostType::Adoption, AnimalType::Dog, "Pipoca", "Poodle mix", "1 ano", "Pipoca é alegre, brincalhão, vacinado e pronto para um novo lar.", "Campinas, SP", "Cambuí", authors[2].clone(), 203, 41, 88, false, "5h atrás", "(19) 95555-0005", &["vacinado", "resgatado"]),
-        post("6", PostType::Campaign, AnimalType::Other, "Campanha Ração Solidária", "Todos os animais", "Vários", "Abrigo com estoque crítico de ração para 85 animais.", "São Paulo, SP", "Mooca", authors[5].clone(), 412, 78, 305, false, "1 dia atrás", "(11) 94444-0006", &["campanha", "doação", "ração"]),
-        post("post1", PostType::Post, AnimalType::Dog, "Dica de hoje", "", "", "Cães precisam de água fresca disponível o dia todo.", "São Paulo, SP", "Pinheiros", authors[3].clone(), 284, 37, 91, false, "1h atrás", "", &["dica", "saúde"]),
+        post("1", PostType::Adoption, AnimalType::Dog, "Mel", "Vira-lata Caramelo", "2 anos", "Mel Ã© dÃ³cil, vacinada, castrada e busca um lar cheio de amor.", "SÃ£o Paulo, SP", "Vila Mariana", authors[0].clone(), 127, 23, 45, false, "2h atrÃ¡s", "(11) 99999-0001", &["vacinada", "castrada", "dÃ³cil"]),
+        post("2", PostType::Emergency, AnimalType::Cat, "Sem nome", "Gatinho tigrado", "Estimado 3 meses", "Gatinho encontrado ferido na Av. Paulista. Precisa de atendimento veterinÃ¡rio urgente.", "SÃ£o Paulo, SP", "Bela Vista", authors[1].clone(), 340, 67, 210, true, "45min atrÃ¡s", "(11) 98888-0002", &["emergÃªncia", "ferido"]),
+        post("3", PostType::Lost, AnimalType::Dog, "Thor", "Golden Retriever", "4 anos", "Thor fugiu no Parque Ibirapuera. Tem coleira azul e microchip.", "SÃ£o Paulo, SP", "Ibirapuera", authors[4].clone(), 892, 134, 567, true, "1 dia atrÃ¡s", "(11) 97777-0003", &["perdido", "recompensa"]),
+        post("4", PostType::Found, AnimalType::Cat, "Desconhecido", "SiamÃªs", "Adulto", "Gato siamÃªs encontrado no Jardins, seguro e bem alimentado.", "SÃ£o Paulo, SP", "Jardins", authors[4].clone(), 56, 12, 34, false, "3h atrÃ¡s", "(11) 96666-0004", &["encontrado", "siamÃªs"]),
+        post("5", PostType::Adoption, AnimalType::Dog, "Pipoca", "Poodle mix", "1 ano", "Pipoca Ã© alegre, brincalhÃ£o, vacinado e pronto para um novo lar.", "Campinas, SP", "CambuÃ­", authors[2].clone(), 203, 41, 88, false, "5h atrÃ¡s", "(19) 95555-0005", &["vacinado", "resgatado"]),
+        post("6", PostType::Campaign, AnimalType::Other, "Campanha RaÃ§Ã£o SolidÃ¡ria", "Todos os animais", "VÃ¡rios", "Abrigo com estoque crÃ­tico de raÃ§Ã£o para 85 animais.", "SÃ£o Paulo, SP", "Mooca", authors[5].clone(), 412, 78, 305, false, "1 dia atrÃ¡s", "(11) 94444-0006", &["campanha", "doaÃ§Ã£o", "raÃ§Ã£o"]),
+        post("post1", PostType::Post, AnimalType::Dog, "Dica de hoje", "", "", "CÃ£es precisam de Ã¡gua fresca disponÃ­vel o dia todo.", "SÃ£o Paulo, SP", "Pinheiros", authors[3].clone(), 284, 37, 91, false, "1h atrÃ¡s", "", &["dica", "saÃºde"]),
     ]
 }
 
-pub fn seed_conversations() -> Vec<ChatConversation> {
+fn build_conversations() -> Vec<ChatConversation> {
     let authors = seed_authors();
     vec![
         conversation(
             "c1",
             "1",
             authors[0].clone(),
-            "Olá! Tenho interesse em adotar a Mel.",
+            "OlÃ¡! Tenho interesse em adotar a Mel.",
             "14:32",
             2,
-            "Mel - Adoção",
+            "Mel - AdoÃ§Ã£o",
         ),
         conversation(
             "c2",
@@ -244,10 +278,10 @@ pub fn seed_conversations() -> Vec<ChatConversation> {
             "c3",
             "6",
             authors[5].clone(),
-            "Quero contribuir com ração. Como faço?",
+            "Quero contribuir com raÃ§Ã£o. Como faÃ§o?",
             "Ontem",
             1,
-            "Campanha Ração Solidária",
+            "Campanha RaÃ§Ã£o SolidÃ¡ria",
         ),
     ]
 }
@@ -257,7 +291,7 @@ pub fn seed_messages(room_id: &str) -> Vec<ChatMessage> {
         ChatMessage {
             id: format!("{room_id}-m1"),
             sender_id: "u1".into(),
-            body: "Olá, obrigado por chamar pelo ZooHelp.".into(),
+            body: "OlÃ¡, obrigado por chamar pelo ZooHelp.".into(),
             created_at: "14:30".into(),
         },
         ChatMessage {
@@ -298,7 +332,7 @@ fn ong(
         name: name.into(),
         short_name: short_name.into(),
         description: description.into(),
-        mission: "Resgatar, tratar e recolocar animais em lares responsáveis.".into(),
+        mission: "Resgatar, tratar e recolocar animais em lares responsÃ¡veis.".into(),
         location: location.into(),
         city: city.into(),
         state: state.into(),
@@ -334,6 +368,8 @@ fn post(
     created_at: &str,
     contact: &str,
     tags: &[&str],
+    latitude: f64,
+    longitude: f64,
 ) -> Post {
     Post {
         id: id.into(),
@@ -355,6 +391,8 @@ fn post(
         created_at: created_at.into(),
         contact: contact.into(),
         tags: tags.iter().map(|tag| (*tag).into()).collect(),
+        latitude,
+        longitude,
     }
 }
 
@@ -377,3 +415,4 @@ fn conversation(
         post_title: post_title.into(),
     }
 }
+
