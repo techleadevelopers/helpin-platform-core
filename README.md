@@ -1,4 +1,4 @@
-﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp Hybrid Core Platform
+﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp - Help the animals near you.
 
 ### Enterprise-Grade Global Animal Rescue Infrastructure
 
