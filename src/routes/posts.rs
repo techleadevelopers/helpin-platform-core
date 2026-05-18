@@ -71,6 +71,36 @@ pub struct LikeResponse {
     pub liked: bool,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+pub struct CommentRequest {
+    #[validate(length(min = 1, max = 2000))]
+    pub body: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentResponse {
+    pub id: String,
+    pub post_id: String,
+    pub body: String,
+    pub created_at: &'static str,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct ReportRequest {
+    #[validate(length(min = 1, max = 120))]
+    pub reason: String,
+    pub details: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportResponse {
+    pub id: String,
+    pub post_id: String,
+    pub status: &'static str,
+}
+
 pub async fn create_post(
     Json(payload): Json<CreatePostRequest>,
 ) -> Result<(StatusCode, Json<CreatePostResponse>), ApiError> {
@@ -207,4 +237,50 @@ pub async fn toggle_like(Path(id): Path<String>) -> Result<Json<LikeResponse>, A
     }
 
     Err(ApiError::NotFound)
+}
+
+pub async fn create_comment(
+    Path(id): Path<String>,
+    Json(payload): Json<CommentRequest>,
+) -> Result<(StatusCode, Json<CommentResponse>), ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+    let _ = payload.details.as_deref();
+
+    if !seed_posts().iter().any(|post| post.id == id) {
+        return Err(ApiError::NotFound);
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CommentResponse {
+            id: uuid::Uuid::now_v7().to_string(),
+            post_id: id,
+            body: payload.body,
+            created_at: "agora",
+        }),
+    ))
+}
+
+pub async fn report_post(
+    Path(id): Path<String>,
+    Json(payload): Json<ReportRequest>,
+) -> Result<(StatusCode, Json<ReportResponse>), ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+
+    if !seed_posts().iter().any(|post| post.id == id) {
+        return Err(ApiError::NotFound);
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ReportResponse {
+            id: uuid::Uuid::now_v7().to_string(),
+            post_id: id,
+            status: "queued_review",
+        }),
+    ))
 }
