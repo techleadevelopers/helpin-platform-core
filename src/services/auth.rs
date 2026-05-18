@@ -22,7 +22,8 @@ pub struct AccessClaims {
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)?
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|error| anyhow::anyhow!("password hashing failed: {error}"))?
         .to_string())
 }
 
@@ -57,6 +58,7 @@ pub fn issue_access_token(
     )?)
 }
 
+#[allow(dead_code)]
 pub fn verify_access_token(config: &Config, token: &str) -> anyhow::Result<AccessClaims> {
     Ok(decode::<AccessClaims>(
         token,
@@ -111,8 +113,8 @@ mod tests {
             refresh_token_ttl_days: 30,
         };
 
-        let token = issue_access_token(&config, "u1", "user@zoohelp.com", AccountType::Ong)
-            .expect("token");
+        let token =
+            issue_access_token(&config, "u1", "user@zoohelp.com", AccountType::Ong).expect("token");
         let claims = verify_access_token(&config, &token).expect("claims");
 
         assert_eq!(claims.sub, "u1");
