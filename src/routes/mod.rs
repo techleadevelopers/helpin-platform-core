@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/chat/rooms/:id/messages",
             get(chat::list_messages).post(chat::send_message),
         )
+        .route("/v1/chat/rooms/:id/ws", get(chat::room_ws))
         .route("/v1/geo/nearby", get(geo::nearby_cases))
         .route("/v1/ongs", get(ongs::list_ongs))
         .route("/v1/ongs/:id", get(ongs::get_ong))
@@ -67,6 +68,9 @@ mod tests {
             redis_url: "redis://localhost:6379".into(),
             nats_url: "nats://localhost:4222".into(),
             ai_worker_url: "http://127.0.0.1:8090".into(),
+            jwt_secret: "test-secret".into(),
+            access_token_ttl_minutes: 15,
+            refresh_token_ttl_days: 30,
         };
         let state = AppState::new(config).await.expect("test state");
         router(state)
