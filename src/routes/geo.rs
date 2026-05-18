@@ -1,10 +1,7 @@
 use axum::{extract::Query, Json};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    domain::{seed_posts, Post},
-    services::geo::haversine_km,
-};
+use crate::{domain::{seed_posts, Post}, services::geo::haversine_km};
 
 #[derive(Deserialize)]
 pub struct NearbyQuery {
@@ -28,8 +25,7 @@ pub async fn nearby_cases(Query(query): Query<NearbyQuery>) -> Json<Vec<NearbyCa
         .into_iter()
         .enumerate()
         .filter_map(|(index, post)| {
-            let point = synthetic_point_for_seed(index);
-            let distance = haversine_km(origin.0, origin.1, point.0, point.1);
+            let distance = haversine_km(origin.0, origin.1, post.latitude, post.longitude);
             (distance <= radius).then_some(NearbyCase {
                 post,
                 distance_km: (distance * 10.0).round() / 10.0,
@@ -38,10 +34,4 @@ pub async fn nearby_cases(Query(query): Query<NearbyQuery>) -> Json<Vec<NearbyCa
         .collect();
 
     Json(cases)
-}
-
-fn synthetic_point_for_seed(index: usize) -> (f64, f64) {
-    let lat = -23.5505 + (index as f64 * 0.018);
-    let lng = -46.6333 + (index as f64 * 0.014);
-    (lat, lng)
 }
