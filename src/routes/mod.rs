@@ -114,7 +114,12 @@ mod tests {
                     "name": "ONG Teste",
                     "email": "ong@zoohelp.com",
                     "password": "senha-segura",
-                    "accountType": "ong"
+                    "accountType": "ong",
+                    "ongType": "rescue",
+                    "cnpj": "12.345.678/0001-90",
+                    "phone": "(11) 99999-0001",
+                    "city": "Sao Paulo",
+                    "state": "SP"
                 })
                 .to_string(),
             ))
@@ -124,6 +129,8 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["user"]["type"], "ong");
+        assert_eq!(body["ongProfile"]["ongType"], "rescue");
+        assert_eq!(body["ongProfile"]["phone"], "(11) 99999-0001");
         assert_eq!(body["tokenType"], "Bearer");
     }
 
