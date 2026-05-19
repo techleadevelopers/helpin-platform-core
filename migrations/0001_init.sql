@@ -1,4 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
 
@@ -35,7 +34,8 @@ CREATE TABLE ong_profiles (
   mission text,
   city text,
   state text,
-  location geography(Point, 4326),
+  latitude double precision CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+  longitude double precision CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180),
   verified_at timestamptz,
   area_type text,
   contact_phone text,
@@ -52,7 +52,8 @@ CREATE TABLE posts (
   age text,
   title text,
   description text NOT NULL,
-  location geography(Point, 4326),
+  latitude double precision CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+  longitude double precision CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180),
   location_label text,
   neighborhood text,
   contact text,
@@ -67,10 +68,10 @@ CREATE TABLE posts (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX posts_location_idx ON posts USING gist(location);
+CREATE INDEX posts_location_idx ON posts (latitude, longitude);
 CREATE INDEX posts_feed_idx ON posts (created_at DESC, post_type, urgent);
 CREATE INDEX posts_tags_idx ON posts USING gin(tags);
-CREATE INDEX ong_profiles_location_idx ON ong_profiles USING gist(location);
+CREATE INDEX ong_profiles_location_idx ON ong_profiles (latitude, longitude);
 
 CREATE TABLE media_upload_intents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
