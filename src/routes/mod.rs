@@ -250,6 +250,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emergency_post_requires_real_coordinates() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/posts")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "name": "Pedido de ajuda",
+                    "postType": "emergency",
+                    "animalType": "other",
+                    "description": "Animal ferido precisa de ajuda agora.",
+                    "location": "Localizacao atual",
+                    "urgent": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (status, _body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn emergency_post_dispatches_geo_rescue_alert() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/posts")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "name": "Pedido de ajuda",
+                    "postType": "emergency",
+                    "animalType": "other",
+                    "description": "Animal ferido precisa de ajuda agora.",
+                    "location": "Localizacao atual",
+                    "neighborhood": "Localizacao atual",
+                    "urgent": true,
+                    "latitude": -23.5505,
+                    "longitude": -46.6333
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (status, body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["post"]["latitude"], -23.5505);
+        assert_eq!(body["post"]["longitude"], -46.6333);
+        assert_eq!(body["rescueAlert"]["critical"], true);
+        assert_eq!(body["rescueAlert"]["radiusKm"], 8.0);
+    }
+
+    #[tokio::test]
     async fn media_upload_intent_validates_image_contract() {
         let app = test_app().await;
         let request = Request::builder()
