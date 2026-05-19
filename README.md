@@ -1,4 +1,4 @@
-﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp Hybrid Core
+# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp Hybrid Core
 
 `zoohelp-backend` is the Rust-first backend infrastructure for ZooHelp, a geolocation-driven animal rescue, adoption, NGO coordination, trust, notification, and community protection platform.
 
@@ -10,7 +10,7 @@ ZooHelp is not only an adoption app. The backend is being shaped as a real-time 
 
 ![Rust](https://img.shields.io/badge/Rust-Core_Backend-orange?style=for-the-badge&logo=rust)
 ![Python](https://img.shields.io/badge/Python-AI_Workers-blue?style=for-the-badge&logo=python)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-PostGIS-blue?style=for-the-badge&logo=postgresql)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Core_DB-blue?style=for-the-badge&logo=postgresql)
 ![Redis](https://img.shields.io/badge/Redis-Geospatial_Cache-red?style=for-the-badge&logo=redis)
 ![Axum](https://img.shields.io/badge/Axum-HTTP%2FWebSocket-darkorange?style=for-the-badge&logo=rust)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-blue?style=for-the-badge&logo=docker)
@@ -85,7 +85,7 @@ The codebase is organized around practical production constraints:
    |-- push-token subscription registry
    |
    v
-[PostgreSQL + PostGIS]  [Redis Geospatial Cache]  [NATS/Kafka - planned production queue]
+[PostgreSQL latitude/longitude]  [Redis Geospatial Cache - production scale]  [NATS/Kafka - planned production queue]
    |
    v
 [Python Intelligence Layer]
@@ -309,7 +309,7 @@ Useful evidence for production hardening:
 - WebSocket connection count and fan-out latency
 - rescue alert fan-out time by recipient count
 - Redis geospatial query latency
-- PostGIS nearby query latency
+- PostgreSQL coordinate query latency
 - push delivery success and delay by provider
 - image upload success rate and moderation delay
 - report/fraud false-positive review rate
@@ -324,7 +324,7 @@ The production target is:
 Mobile App
   -> Cloudflare / Edge Protection
   -> Rust API Gateway
-  -> PostgreSQL + PostGIS
+  -> PostgreSQL latitude/longitude
   -> Redis Geospatial / Rate Limit / Session Cache
   -> NATS or Kafka Event Bus
   -> Notification Delivery Workers
@@ -337,7 +337,7 @@ Recommended durability split:
 
 | Layer | Production Role |
 |-------|-----------------|
-| PostgreSQL/PostGIS | authoritative relational and geospatial state |
+| PostgreSQL | authoritative relational state and latitude/longitude storage |
 | Redis | low-latency geospatial lookup, cache, rate limits |
 | NATS/Kafka | durable rescue alert and moderation events |
 | Rust workers | notification fan-out, realtime coordination, trust/fraud core |
@@ -435,7 +435,7 @@ Requirements:
 - Rust toolchain
 - Docker
 - Docker Compose
-- PostgreSQL/PostGIS
+- PostgreSQL
 - Redis
 - Python 3.11+
 - pnpm for the mobile workspace
@@ -555,3 +555,4 @@ The strategic direction is narrow and operational:
 The operating thesis is:
 
 `simple mobile action -> reliable backend coordination -> nearby human response -> measurable animal impact`
+
