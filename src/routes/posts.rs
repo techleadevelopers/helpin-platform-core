@@ -10,6 +10,7 @@ use crate::{
     domain::{seed_authors, seed_posts, AnimalType, Post, PostMedia, PostType},
     error::ApiError,
     services::fraud,
+    services::notifications::RescueAlert,
     state::AppState,
 };
 
@@ -71,6 +72,7 @@ pub struct CreatePostResponse {
     pub media: Vec<PostMedia>,
     pub moderation_status: &'static str,
     pub fraud_risk: u8,
+    pub rescue_alert: Option<RescueAlert>,
 }
 
 #[derive(Serialize)]
@@ -130,6 +132,12 @@ pub async fn create_post(
         .or_else(|| payload.image.clone());
     let is_urgent = payload.urgent.unwrap_or(false);
     let post_type = payload.post_type.clone();
+    let requires_geo_alert = is_urgent || post_type == PostType::Emergency;
+    if requires_geo_alert && (payload.latitude.is_none() || payload.longitude.is_none()) {
+        return Err(ApiError::Validation(
+            "latitude and longitude are required for emergency rescue alerts".into(),
+        ));
+    }
 
     let post = Post {
         id: uuid::Uuid::now_v7().to_string(),
@@ -156,7 +164,7 @@ pub async fn create_post(
         longitude: payload.longitude.unwrap_or(-46.6333),
     };
 
-    if is_urgent || post.post_type == PostType::Emergency {
+    let rescue_alert = if requires_geo_alert {
         let alert = state.notifications.dispatch_rescue_alert(&post, 5.0);
         tracing::info!(
             post_id = %post.id,
@@ -164,7 +172,10 @@ pub async fn create_post(
             critical = alert.critical,
             "rescue alert queued"
         );
-    }
+        Some(alert)
+    } else {
+        None
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -173,6 +184,7 @@ pub async fn create_post(
             media,
             moderation_status: "queued",
             fraud_risk: risk,
+            rescue_alert,
         }),
     ))
 }
