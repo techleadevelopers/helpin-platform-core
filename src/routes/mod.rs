@@ -12,6 +12,7 @@ mod donations;
 mod feed;
 mod geo;
 mod health;
+mod maps;
 mod marketplace;
 mod media;
 mod notifications;
@@ -54,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/chat/rooms/:id/ws", get(chat::room_ws))
         .route("/v1/geo/nearby", get(geo::nearby_cases))
+        .route("/v1/maps/static-url", get(maps::static_map_url))
         .route("/v1/ongs", get(ongs::list_ongs))
         .route("/v1/ongs/:id", get(ongs::get_ong))
         .route("/v1/ongs/:id/follow", post(ongs::follow_ong))
@@ -122,6 +124,8 @@ mod tests {
             cloudinary_cloud_name: "limpeja".into(),
             cloudinary_api_key: Some("test-api-key".into()),
             cloudinary_api_secret: Some("test-api-secret".into()),
+            geocoding_api_provider: Some("google".into()),
+            google_maps_api_key: Some("test-google-key".into()),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
         };
@@ -137,6 +141,29 @@ mod tests {
             .expect("body");
         let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn static_map_url_uses_google_maps_config() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/maps/static-url?lat=-23.5505&lng=-46.6333&zoom=14")
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, value) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["provider"], "google");
+        assert!(value["imageUrl"]
+            .as_str()
+            .expect("image url")
+            .contains("maps.googleapis.com/maps/api/staticmap"));
+        assert!(value["imageUrl"]
+            .as_str()
+            .expect("image url")
+            .contains("key=test-google-key"));
     }
 
     #[tokio::test]
