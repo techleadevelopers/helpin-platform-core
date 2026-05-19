@@ -22,7 +22,10 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
+            bind_addr: env::var("PORT")
+                .map(|port| format!("0.0.0.0:{port}"))
+                .or_else(|_| env::var("BIND_ADDR"))
+                .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
             database_url: env::var("DATABASE_URL").context("DATABASE_URL is required")?,
             redis_url: env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
