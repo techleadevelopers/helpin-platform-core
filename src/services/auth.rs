@@ -112,6 +112,8 @@ mod tests {
             cloudinary_cloud_name: "limpeja".into(),
             cloudinary_api_key: Some("test-api-key".into()),
             cloudinary_api_secret: Some("test-api-secret".into()),
+            geocoding_api_provider: Some("google".into()),
+            google_maps_api_key: Some("test-google-key".into()),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
         };
