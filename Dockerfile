@@ -29,4 +29,4 @@ ENV RUST_LOG=zoohelp_backend=info,tower_http=info
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "if [ -z \"$BIND_ADDR\" ]; then export BIND_ADDR=\"0.0.0.0:${PORT:-8080}\"; fi; exec /app/zoohelp-backend"]
+CMD ["sh", "-c", "if [ -n \"$PORT\" ]; then export BIND_ADDR=\"0.0.0.0:$PORT\"; elif [ -z \"$BIND_ADDR\" ]; then export BIND_ADDR=\"0.0.0.0:8080\"; fi; exec /app/zoohelp-backend"]
