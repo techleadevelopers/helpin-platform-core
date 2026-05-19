@@ -80,9 +80,7 @@ pub struct Post {
     pub created_at: String,
     pub contact: String,
     pub tags: Vec<String>,
-    #[serde(skip_serializing)]
     pub latitude: f64,
-    #[serde(skip_serializing)]
     pub longitude: f64,
 }
 
