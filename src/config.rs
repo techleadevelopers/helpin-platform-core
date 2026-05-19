@@ -13,6 +13,8 @@ pub struct Config {
     pub cloudinary_cloud_name: String,
     pub cloudinary_api_key: Option<String>,
     pub cloudinary_api_secret: Option<String>,
+    pub geocoding_api_provider: Option<String>,
+    pub google_maps_api_key: Option<String>,
     pub access_token_ttl_minutes: i64,
     pub refresh_token_ttl_days: i64,
 }
@@ -35,6 +37,8 @@ impl Config {
                 .unwrap_or_else(|| "zoohelp-dev".to_string()),
             cloudinary_api_key: env::var("CLOUDINARY_API_KEY").ok(),
             cloudinary_api_secret: env::var("CLOUDINARY_API_SECRET").ok(),
+            geocoding_api_provider: env::var("GEOCODING_API_PROVIDER").ok(),
+            google_maps_api_key: env::var("GOOGLE_MAPS_API_KEY").ok(),
             access_token_ttl_minutes: env::var("ACCESS_TOKEN_TTL_MINUTES")
                 .ok()
                 .and_then(|value| value.parse().ok())
