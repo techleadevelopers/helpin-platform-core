@@ -15,15 +15,20 @@ mod health;
 mod marketplace;
 mod media;
 mod notifications;
+mod observability;
 mod ongs;
 mod posts;
+mod rescue;
 mod search;
+mod support;
 mod trust;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
+        .route("/metrics", get(observability::metrics))
+        .route("/v1/observability", get(observability::status))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/register", post(auth::register))
         .route(
@@ -55,6 +60,39 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/donations/intents", post(donations::create_intent))
         .route("/v1/trust/score/:subject_id", get(trust::score))
         .route("/v1/notifications", get(notifications::list_notifications))
+        .route(
+            "/v1/notifications/:id/mark-as-read",
+            axum::routing::patch(notifications::mark_as_read),
+        )
+        .route("/v1/notifications/:id/ack", post(notifications::ack))
+        .route(
+            "/v1/notifications/push-token",
+            post(notifications::register_push_token),
+        )
+        .route(
+            "/v1/notifications/rescue-alerts/:post_id/preview",
+            post(notifications::preview_rescue_alert),
+        )
+        .route("/v1/rescue/active", post(rescue::trigger))
+        .route(
+            "/v1/rescue/active/:id/location",
+            axum::routing::patch(rescue::update_location),
+        )
+        .route(
+            "/v1/rescue/active/:id/end",
+            axum::routing::patch(rescue::end),
+        )
+        .route("/v1/rescue/active/:id/incident", post(rescue::incident))
+        .route("/v1/support/meta", get(support::meta))
+        .route(
+            "/v1/support/tickets",
+            get(support::list_tickets).post(support::create_ticket),
+        )
+        .route("/v1/support/tickets/:id", get(support::get_ticket))
+        .route(
+            "/v1/support/tickets/:id/messages",
+            post(support::add_message),
+        )
         .route("/v1/search", get(search::search))
         .route("/v1/marketplace/items", get(marketplace::list_items))
         .route("/v1/ai/moderation-jobs", post(ai::enqueue_moderation_job))
