@@ -1,120 +1,557 @@
-﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp - Help the animals near you.
+﻿# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp Hybrid Core
 
-> Helping vulnerable animals has always meant a lot to me, and seeing technology used to create real-world compassion, rescue, and community impact is something I genuinely respect. 💚
+`zoohelp-backend` is the Rust-first backend infrastructure for ZooHelp, a geolocation-driven animal rescue, adoption, NGO coordination, trust, notification, and community protection platform.
+
+The system is designed around one operational problem:
+
+`animal in need -> trusted report -> geospatial prioritization -> nearby helpers/NGOs -> coordinated rescue outcome`
+
+ZooHelp is not only an adoption app. The backend is being shaped as a real-time animal protection coordination layer: posts, rescue alerts, chat, nearby search, NGO profiles, trust signals, media moderation, donation intents, support workflows, and AI-assisted operational tooling.
 
 ![Rust](https://img.shields.io/badge/Rust-Core_Backend-orange?style=for-the-badge&logo=rust)
 ![Python](https://img.shields.io/badge/Python-AI_Workers-blue?style=for-the-badge&logo=python)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Database-blue?style=for-the-badge&logo=postgresql)
-![Redis](https://img.shields.io/badge/Redis-Cache-red?style=for-the-badge&logo=redis)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-PostGIS-blue?style=for-the-badge&logo=postgresql)
+![Redis](https://img.shields.io/badge/Redis-Geospatial_Cache-red?style=for-the-badge&logo=redis)
+![Axum](https://img.shields.io/badge/Axum-HTTP%2FWebSocket-darkorange?style=for-the-badge&logo=rust)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-blue?style=for-the-badge&logo=docker)
-![Cloudflare](https://img.shields.io/badge/Cloudflare-Global_Edge-orange?style=for-the-badge&logo=cloudflare)
 ![License](https://img.shields.io/badge/License-Private-darkgreen?style=for-the-badge)
 
-### Enterprise-Grade Global Animal Rescue Infrastructure
+## Objective
 
-ZooHelp Hybrid Core is the high-performance backend infrastructure powering ZooHelp’s global ecosystem for animal rescue, adoption, NGO networking, trust systems, geolocation, social marketplace operations, and large-scale community protection.
+ZooHelp Hybrid Core provides the backend runtime for a modern animal rescue network.
 
-Built for:
-- Low latency
-- High concurrency
-- Global expansion
-- Trust-critical systems
-- Marketplace scalability
-- Institutional resilience
-- Future enterprise NGO infrastructure
+The platform is intended to support cases such as:
 
----
+- a person finds an injured animal and posts an urgent request
+- GPS coordinates are attached to the rescue post
+- nearby users, volunteers, vets, and NGOs are identified
+- rescue alerts are generated with deep links and action payloads
+- the feed prioritizes urgent and nearby cases
+- chat coordinates the rescue operation
+- trust signals reduce abuse, fraud, and low-quality reports
+- media moderation and AI workers assist content safety
+- donations, support tickets, and NGO profiles support the broader ecosystem
 
-# Core Mission
+The operating model is:
 
-To provide scalable, secure, and globally deployable backend infrastructure for modern animal protection ecosystems.
+`always available -> mostly local relevance -> urgent cases prioritized -> nearby response activated`
 
-This platform is designed to support:
-- Rescue operations
-- Adoption systems
-- NGO collaboration
-- Real-time geolocation
-- Community trust scoring
-- Donation systems
-- Fraud prevention
-- AI-assisted moderation
+## Product Positioning
 
----
+The core product claim is:
 
-# Architecture Overview
+`geospatial rescue coordination + trust-aware community feed + NGO operational network + AI-assisted safety`
 
-## Hybrid Infrastructure Model
+The backend is intentionally split by responsibility:
 
-### Rust Core Platform
-Primary backend optimized for:
-- Ultra-low latency
-- High throughput
-- Memory safety
-- API scalability
-- Event-driven infrastructure
-- Mission-critical business logic
+- Rust owns latency-sensitive, high-concurrency, user-facing systems.
+- Python owns ML, automation, moderation, analytics, and experimental intelligence layers.
 
----
+This separation keeps the operational path fast while allowing the intelligence layer to evolve without slowing the critical rescue flow.
 
-### Python Intelligence Layer
-Dedicated AI/ML systems for:
-- Image moderation
-- NLP pipelines
-- Recommendation models
-- Fraud detection models
-- Content classification
-- Analytics
-- Internal automation
-- Operational tooling
+## Design Principles
 
----
+The codebase is organized around practical production constraints:
 
-# Technology Stack
+- keep urgent rescue creation fast and deterministic
+- require real geolocation for emergency fan-out
+- prioritize nearby cases before generic feed content
+- separate core backend from AI workers
+- make fraud, trust, moderation, and reporting first-class systems
+- preserve mobile/backend contract compatibility with tests
+- avoid putting heavy ML inference in the request hot path
+- treat observability and readiness as production features, not afterthoughts
 
-## Core Backend
-- Rust
-- Axum
-- Tokio
-- SQLx
-- PostgreSQL
-- PostGIS
-- Redis
-- Kafka / NATS
-- Docker
-- Cloudflare
-- OpenAPI
-- JWT/Auth
-- WebSockets
+## Architecture Overview
 
----
+```text
+[Mobile App]
+   |  HTTPS / WebSocket
+   v
+[Rust API Gateway - Axum/Tokio]
+   |-- Auth / Users / Sessions
+   |-- Feed / Posts / Media / Search
+   |-- Chat HTTP + WebSocket
+   |-- Geo Nearby / Rescue Alerts
+   |-- ONG Profiles / Follow / Trust
+   |-- Donations / Support / Reports
+   |
+   | events / jobs
+   v
+[Notification Engine]
+   |-- nearby recipient selection
+   |-- rescue alert generation
+   |-- deep link action payloads
+   |-- push-token subscription registry
+   |
+   v
+[PostgreSQL + PostGIS]  [Redis Geospatial Cache]  [NATS/Kafka - planned production queue]
+   |
+   v
+[Python Intelligence Layer]
+   |-- image moderation
+   |-- NLP classification
+   |-- fraud model experiments
+   |-- recommendation jobs
+   |-- analytics and admin automation
+```
 
-## Intelligence Layer
-- Python
-- FastAPI
-- PyTorch / TensorFlow
-- OpenCV
-- NLP pipelines
-- Celery / background workers
-- Fraud analytics
-- Recommendation engines
+## Runtime Pipeline
 
----
+The active rescue publication flow is intentionally linear.
 
-# Local Development
+1. Mobile user writes a rescue/help request.
+2. Mobile captures photo, urgency, and GPS coordinates.
+3. Rust validates post payload and media contract.
+4. Emergency posts must include `latitude` and `longitude`.
+5. Rust creates the post contract.
+6. Fraud text scoring runs in the request path as a cheap deterministic signal.
+7. Rescue alert dispatch is triggered for urgent/emergency cases.
+8. Notification engine computes nearby recipients by distance.
+9. Alert payload includes title, body, image, coordinates, radius, critical flag, and deep-link actions.
+10. Feed/search/notifications expose the rescue case back to the app.
 
-## Requirements
+Simplified:
+
+`mobile GPS -> post create -> validation -> rescue alert -> nearby recipients -> feed/chat coordination`
+
+## Operational Rescue Alert Model
+
+The current backend supports a production-shaped rescue alert contract.
+
+Emergency posts require:
+
+- `postType = emergency` or `urgent = true`
+- `latitude`
+- `longitude`
+- description
+- location label
+
+When accepted, the backend generates a `rescueAlert` response:
+
+```json
+{
+  "critical": true,
+  "radiusKm": 8.0,
+  "lat": -23.5505,
+  "lng": -46.6333,
+  "actions": [
+    { "id": "go_to_location", "label": "Ir ao local" },
+    { "id": "remote_support", "label": "Apoiar remoto" }
+  ],
+  "recipients": []
+}
+```
+
+The current in-memory `NotificationEngine` is suitable for contract validation and product integration. For large-scale production delivery, the next hardening step is connecting this engine to durable queues plus FCM/APNs delivery workers.
+
+## Core Backend Surface
+
+### Auth and Identity
+
+- `POST /v1/auth/login`
+- `POST /v1/auth/register`
+- `POST /v1/auth/password-reset`
+- `DELETE /v1/me`
+
+Supports personal users, NGOs, and vet-style accounts at the frontend contract level.
+
+### Feed and Posts
+
+- `GET /v1/feed`
+- `POST /v1/posts`
+- `GET /v1/posts/:id`
+- `POST /v1/posts/:id/like`
+- `POST /v1/posts/:id/comments`
+- `POST /v1/posts/:id/report`
+
+Posts support adoption, lost, found, emergency, campaign, and general community post types.
+
+### Media
+
+- `POST /v1/media/upload-intents`
+
+Cloudinary upload-intent flow is used for image/video media before post creation.
+
+### Chat
+
+- `GET /v1/chat/rooms`
+- `GET /v1/chat/rooms/:id`
+- `GET /v1/chat/rooms/:id/messages`
+- `POST /v1/chat/rooms/:id/messages`
+- `GET /v1/chat/rooms/:id/ws`
+
+HTTP chat and WebSocket room path are present for real-time coordination.
+
+### Geolocation
+
+- `GET /v1/geo/nearby`
+
+Nearby logic is based on geographic distance and is aligned with rescue, feed, and map usage.
+
+### Notifications
+
+- `GET /v1/notifications`
+- `PATCH /v1/notifications/:id/mark-as-read`
+- `POST /v1/notifications/:id/ack`
+- `POST /v1/notifications/push-token`
+- `POST /v1/notifications/rescue-alerts/:post_id/preview`
+
+The notification layer supports rescue alert modeling, push token registration, dedupe keys, categories, deep links, and critical flags.
+
+### NGOs, Trust, Donations, Support, Search
+
+- `GET /v1/ongs`
+- `GET /v1/ongs/:id`
+- `POST /v1/ongs/:id/follow`
+- `GET /v1/trust/score/:subject_id`
+- `POST /v1/donations/intents`
+- `GET /v1/support/meta`
+- `GET /v1/support/tickets`
+- `POST /v1/support/tickets`
+- `GET /v1/search`
+
+## Hybrid Intelligence Layer
+
+Python is reserved for auxiliary intelligence and automation, not the latency-sensitive request core.
+
+Intended Python responsibilities:
+
+- image moderation
+- content classification
+- NLP risk tagging
+- advanced recommendations
+- analytics pipelines
+- internal dashboards
+- fraud model experiments
+- admin automation scripts
+
+Production rule:
+
+`Rust handles real-time user operations. Python handles intelligence and background automation.`
+
+## Geospatial Decision Framework
+
+The practical decision model for rescue visibility is based on signals that can be measured and replayed:
+
+- emergency status
+- user location
+- post coordinates
+- radius in kilometers
+- recipient subscription radius
+- trust state
+- content category
+- notification dedupe state
+- feed freshness and proximity
+
+The rescue alert radius is currently:
+
+- urgent/emergency: `8 km`
+- default rescue preview: configurable default, currently `5 km`
+- hard clamp: `1 km` to `50 km`
+
+Compact distance rule:
+
+```math
+recipient\_eligible = distance(post, subscriber) <= min(alert\_radius, subscriber\_radius)
+```
+
+## Operational Evidence
+
+Current local validation is based on automated tests and contract checks.
+
+### Backend Test Surface
+
+`cargo test` currently validates:
+
+- frontend feed filters
+- auth register frontend shape
+- post validation
+- media upload contract
+- emergency coordinate requirement
+- emergency rescue alert dispatch
+- geospatial distance calculations
+- notification recipient filtering
+- fraud scoring
+- trust scoring
+- JWT/password auth services
+
+Latest local result:
+
+```text
+21 passed; 0 failed
+```
+
+### Mobile Contract Validation
+
+The mobile app type contract has been validated with:
+
+```bash
+pnpm --filter zoohelp-mobile run typecheck
+```
+
+This validates the TypeScript contract across:
+
+- post creation
+- latitude/longitude forwarding
+- rescue alert response typing
+- mobile/backend post mapping
+- feed micro-composer integration
+
+## Performance and Scaling Notes
+
+The architecture is designed for low-latency rescue coordination, but performance claims should be backed by measured output.
+
+Useful evidence for production hardening:
+
+- post creation latency p50/p95/p99
+- feed latency p50/p95/p99
+- WebSocket connection count and fan-out latency
+- rescue alert fan-out time by recipient count
+- Redis geospatial query latency
+- PostGIS nearby query latency
+- push delivery success and delay by provider
+- image upload success rate and moderation delay
+- report/fraud false-positive review rate
+
+No unsupported global-scale throughput claim should be treated as production proof until benchmarked with PostgreSQL, Redis, queue, upload, WebSocket, and push delivery enabled.
+
+## Production Architecture Target
+
+The production target is:
+
+```text
+Mobile App
+  -> Cloudflare / Edge Protection
+  -> Rust API Gateway
+  -> PostgreSQL + PostGIS
+  -> Redis Geospatial / Rate Limit / Session Cache
+  -> NATS or Kafka Event Bus
+  -> Notification Delivery Workers
+  -> FCM / APNs
+  -> Python AI Workers
+  -> Observability Stack
+```
+
+Recommended durability split:
+
+| Layer | Production Role |
+|-------|-----------------|
+| PostgreSQL/PostGIS | authoritative relational and geospatial state |
+| Redis | low-latency geospatial lookup, cache, rate limits |
+| NATS/Kafka | durable rescue alert and moderation events |
+| Rust workers | notification fan-out, realtime coordination, trust/fraud core |
+| Python workers | AI moderation, NLP, analytics, model experiments |
+| Cloudinary/S3/R2 | media storage and delivery |
+| FCM/APNs | push notification delivery |
+
+## Security and Trust Model
+
+ZooHelp is a trust-sensitive system. The backend assumes abuse will happen.
+
+Security and integrity controls:
+
+- JWT-based auth surface
+- password hashing service
+- account deletion endpoint
+- report endpoint for content moderation
+- trust scoring service
+- fraud text scoring
+- media moderation queue status
+- push-token registration contract
+- support tickets and operational escalation
+- validation on critical request payloads
+- emergency geolocation requirement
+
+Production hardening still required:
+
+- durable session and refresh-token persistence
+- role-based authorization beyond contract shape
+- full audit log
+- rate limits enforced at edge and API levels
+- durable report/moderation workflow
+- FCM/APNs delivery receipts
+- Redis/NATS-backed notification state
+- database persistence replacing seeded in-memory data where still present
+
+## Reliability Controls
+
+Current reliability-oriented surfaces:
+
+- `/healthz`
+- `/readyz`
+- `/metrics`
+- `/v1/observability`
+- structured rescue alert logging
+- validation tests for frontend/backend contracts
+- Docker Compose local infrastructure
+
+Production reliability targets:
+
+- readiness tied to PostgreSQL/Redis/NATS availability
+- OpenTelemetry traces across post -> alert -> push delivery
+- Sentry or equivalent error aggregation
+- Prometheus dashboards for API, queue, push, and websocket metrics
+- alerting for notification delay, failed uploads, auth failures, and WebSocket disconnect spikes
+
+## Environment Variables
+
+Core backend:
+
+```text
+BIND_ADDR
+DATABASE_URL
+REDIS_URL
+NATS_URL
+AI_WORKER_URL
+JWT_SECRET
+ACCESS_TOKEN_TTL_MINUTES
+REFRESH_TOKEN_TTL_DAYS
+```
+
+Cloudinary media:
+
+```text
+CLOUDINARY_CLOUD_NAME
+CLOUDINARY_API_KEY
+CLOUDINARY_API_SECRET
+CLOUDINARY_URL
+```
+
+Mobile/API integration:
+
+```text
+EXPO_PUBLIC_API_BASE_URL
+```
+
+Operational note:
+
+Do not commit `.env`, secrets, Cloudinary API secrets, tokens, database dumps, local target artifacts, or private operational datasets.
+
+## Running Locally
+
+Requirements:
+
 - Rust toolchain
 - Docker
 - Docker Compose
 - PostgreSQL/PostGIS
 - Redis
 - Python 3.11+
+- pnpm for the mobile workspace
 
----
-
-## Run Locally
+Start infrastructure:
 
 ```bash
+cd backend
 cp .env.example .env
 docker compose up -d
+```
+
+Run backend:
+
+```bash
 cargo run
+```
+
+Run tests:
+
+```bash
+cargo fmt --check
+cargo test
+```
+
+Run mobile type contract:
+
+```bash
+cd ../client
+pnpm --filter zoohelp-mobile run typecheck
+```
+
+## Repository Layout
+
+```text
+backend/
+  Cargo.toml
+  docker-compose.yml
+  migrations/
+    0001_init.sql
+  src/
+    main.rs
+    config.rs
+    domain.rs
+    error.rs
+    state.rs
+    routes/
+      auth.rs
+      chat.rs
+      donations.rs
+      feed.rs
+      geo.rs
+      media.rs
+      notifications.rs
+      ongs.rs
+      posts.rs
+      rescue.rs
+      search.rs
+      support.rs
+      trust.rs
+    services/
+      auth.rs
+      fraud.rs
+      geo.rs
+      notifications.rs
+      rate_limit.rs
+      trust.rs
+  python-workers/
+    app/
+      main.py
+    requirements.txt
+```
+
+## Current Boundaries
+
+This backend is production-shaped, but not yet fully production-complete.
+
+Strong current surfaces:
+
+- Rust Axum API structure
+- mobile/backend contract alignment
+- auth/register contract
+- feed/post/search/ONG/support/donation routes
+- media upload-intent contract
+- chat HTTP and WebSocket route surface
+- geospatial rescue alert modeling
+- emergency coordinate validation
+- notification subscription and alert preview contracts
+- tests for the key frontend/backend paths
+
+Known hardening gaps before real public scale:
+
+- replace remaining seeded data paths with PostgreSQL persistence
+- move notification engine state to Redis/PostgreSQL/NATS
+- deliver push notifications through FCM/APNs workers
+- enforce production rate limits and abuse controls
+- complete durable moderation and report review flows
+- load test with PostgreSQL, Redis, queue, upload, WebSocket, and push delivery enabled
+- add migration-backed user/session/post/chat persistence where still mocked
+- add production observability dashboards and alerting
+
+## Production Intent
+
+ZooHelp Hybrid Core is intended to become a global animal rescue coordination backend.
+
+The strategic direction is narrow and operational:
+
+- fast rescue post creation
+- real geolocation
+- nearby helper discovery
+- trusted community coordination
+- NGO operational profiles
+- chat-based response
+- donation and support infrastructure
+- AI-assisted moderation and fraud prevention
+
+The operating thesis is:
+
+`simple mobile action -> reliable backend coordination -> nearby human response -> measurable animal impact`
