@@ -1,4 +1,8 @@
-use axum::{extract::Path, http::StatusCode, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -6,6 +10,7 @@ use crate::{
     domain::{seed_authors, seed_posts, AnimalType, Post, PostMedia, PostType},
     error::ApiError,
     services::fraud,
+    state::AppState,
 };
 
 const MAX_POST_IMAGES: usize = 4;
@@ -40,6 +45,10 @@ pub struct CreatePostRequest {
     pub urgent: Option<bool>,
     pub contact: Option<String>,
     pub tags: Option<Vec<String>>,
+    #[validate(range(min = -90.0, max = 90.0))]
+    pub latitude: Option<f64>,
+    #[validate(range(min = -180.0, max = 180.0))]
+    pub longitude: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +111,7 @@ pub struct ReportResponse {
 }
 
 pub async fn create_post(
+    State(state): State<AppState>,
     Json(payload): Json<CreatePostRequest>,
 ) -> Result<(StatusCode, Json<CreatePostResponse>), ApiError> {
     payload
@@ -118,10 +128,12 @@ pub async fn create_post(
         .first()
         .map(|image| image.url.clone())
         .or_else(|| payload.image.clone());
+    let is_urgent = payload.urgent.unwrap_or(false);
+    let post_type = payload.post_type.clone();
 
     let post = Post {
         id: uuid::Uuid::now_v7().to_string(),
-        post_type: payload.post_type,
+        post_type,
         animal_type: payload.animal_type,
         name: payload.name.unwrap_or_else(|| "Publicação".into()),
         breed: payload.breed.unwrap_or_default(),
@@ -136,13 +148,23 @@ pub async fn create_post(
         likes: 0,
         comments: 0,
         shares: 0,
-        urgent: payload.urgent.unwrap_or(false),
+        urgent: is_urgent,
         created_at: "agora".into(),
         contact: payload.contact.unwrap_or_default(),
         tags: payload.tags.unwrap_or_default(),
-        latitude: -23.5505,
-        longitude: -46.6333,
+        latitude: payload.latitude.unwrap_or(-23.5505),
+        longitude: payload.longitude.unwrap_or(-46.6333),
     };
+
+    if is_urgent || post.post_type == PostType::Emergency {
+        let alert = state.notifications.dispatch_rescue_alert(&post, 5.0);
+        tracing::info!(
+            post_id = %post.id,
+            recipients = alert.recipients.len(),
+            critical = alert.critical,
+            "rescue alert queued"
+        );
+    }
 
     Ok((
         StatusCode::CREATED,
