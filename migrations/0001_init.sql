@@ -9,6 +9,7 @@ CREATE TABLE users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
   email citext UNIQUE,
+  avatar_url text,
   password_hash text NOT NULL,
   account_type account_type NOT NULL DEFAULT 'person',
   verified boolean NOT NULL DEFAULT false,
