@@ -1,15 +1,17 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
+use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    domain::{seed_authors, seed_posts, AnimalType, Post, PostMedia, PostType},
+    domain::{seed_posts, AccountType, AnimalType, Author, Post, PostMedia, PostType},
     error::ApiError,
-    services::fraud,
+    services::{auth as auth_service, fraud},
     services::notifications::RescueAlert,
     state::AppState,
 };
@@ -25,6 +27,89 @@ const ALLOWED_MEDIA_TYPES: &[&str] = &[
     "video/quicktime",
     "video/webm",
 ];
+
+fn authenticate_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<auth_service::AccessClaims, ApiError> {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let token = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
+}
+
+pub async fn load_author(state: &AppState, user_id: Uuid) -> Result<Author, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id::text, name, avatar_url, verified, account_type::text AS account_type
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+
+    Ok(Author {
+        id: row.get("id"),
+        name: row.get("name"),
+        avatar: row.get("avatar_url"),
+        verified: row.get("verified"),
+        account_type: account_type_from_str(row.get::<&str, _>("account_type")),
+    })
+}
+
+fn account_type_from_str(value: &str) -> AccountType {
+    match value {
+        "ong" => AccountType::Ong,
+        "vet" => AccountType::Vet,
+        _ => AccountType::Person,
+    }
+}
+
+pub fn post_type_as_str(value: &PostType) -> &'static str {
+    match value {
+        PostType::Adoption => "adoption",
+        PostType::Lost => "lost",
+        PostType::Found => "found",
+        PostType::Emergency => "emergency",
+        PostType::Campaign => "campaign",
+        PostType::Post => "post",
+    }
+}
+
+pub fn post_type_from_str(value: &str) -> PostType {
+    match value {
+        "adoption" => PostType::Adoption,
+        "lost" => PostType::Lost,
+        "found" => PostType::Found,
+        "emergency" => PostType::Emergency,
+        "campaign" => PostType::Campaign,
+        _ => PostType::Post,
+    }
+}
+
+fn animal_type_as_str(value: &AnimalType) -> &'static str {
+    match value {
+        AnimalType::Dog => "dog",
+        AnimalType::Cat => "cat",
+        AnimalType::Other => "other",
+    }
+}
+
+pub fn animal_type_from_str(value: &str) -> AnimalType {
+    match value {
+        "dog" => AnimalType::Dog,
+        "cat" => AnimalType::Cat,
+        _ => AnimalType::Other,
+    }
+}
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
@@ -113,6 +198,7 @@ pub struct ReportResponse {
 }
 
 pub async fn create_post(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<CreatePostRequest>,
 ) -> Result<(StatusCode, Json<CreatePostResponse>), ApiError> {
@@ -120,12 +206,11 @@ pub async fn create_post(
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
 
+    let claims = authenticate_request(&state, &headers)?;
+    let author_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let media = normalize_media(&payload)?;
     let risk = fraud::score_post_text(&payload.description);
-    let author = seed_authors()
-        .into_iter()
-        .find(|author| author.id == "u5")
-        .ok_or(ApiError::Internal)?;
+    let author = load_author(&state, author_id).await?;
     let cover_image = media
         .first()
         .map(|image| image.url.clone())
@@ -139,29 +224,102 @@ pub async fn create_post(
         ));
     }
 
+    let name = payload.name.unwrap_or_else(|| "Publicacao".into());
+    let breed = payload.breed.unwrap_or_default();
+    let age = payload.age.unwrap_or_default();
+    let description = payload.description;
+    let location = payload.location.clone();
+    let neighborhood = payload.neighborhood.unwrap_or(payload.location);
+    let contact = payload.contact.unwrap_or_default();
+    let tags = payload.tags.unwrap_or_default();
+    let latitude = payload.latitude.unwrap_or(-23.5505);
+    let longitude = payload.longitude.unwrap_or(-46.6333);
+    let text_only = media.is_empty() && payload.image.is_none();
+
+    let mut tx = state.db.begin().await?;
+    let post_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO posts (
+            author_id, post_type, animal_type, name, breed, age, description,
+            latitude, longitude, location_label, neighborhood, contact, tags,
+            urgent, text_only, moderation_status, fraud_risk
+        )
+        VALUES ($1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'queued', $16)
+        RETURNING id
+        "#,
+    )
+    .bind(author_id)
+    .bind(post_type_as_str(&post_type))
+    .bind(animal_type_as_str(&payload.animal_type))
+    .bind(&name)
+    .bind(&breed)
+    .bind(&age)
+    .bind(&description)
+    .bind(latitude)
+    .bind(longitude)
+    .bind(&location)
+    .bind(&neighborhood)
+    .bind(&contact)
+    .bind(&tags)
+    .bind(is_urgent)
+    .bind(text_only)
+    .bind(i16::from(risk))
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let mut stored_media = Vec::with_capacity(media.len());
+    for (index, item) in media.iter().enumerate() {
+        let media_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO post_media (
+                post_id, provider, resource_type, object_key, public_url, content_type,
+                width, height, size_bytes, sort_order, moderation_status
+            )
+            VALUES ($1, 'cloudinary', $2, $3, $4, $5, $6, $7, $8, $9, 'queued')
+            RETURNING id
+            "#,
+        )
+        .bind(post_id)
+        .bind(if item.content_type.starts_with("video/") { "video" } else { "image" })
+        .bind(&item.url)
+        .bind(&item.url)
+        .bind(&item.content_type)
+        .bind(item.width.map(|value| value as i32))
+        .bind(item.height.map(|value| value as i32))
+        .bind(item.size_bytes.map(|value| value as i64))
+        .bind(index as i16)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let mut persisted = item.clone();
+        persisted.id = media_id.to_string();
+        stored_media.push(persisted);
+    }
+    tx.commit().await?;
+
     let post = Post {
-        id: uuid::Uuid::now_v7().to_string(),
+        id: post_id.to_string(),
         post_type,
         animal_type: payload.animal_type,
-        name: payload.name.unwrap_or_else(|| "Publicaçío".into()),
-        breed: payload.breed.unwrap_or_default(),
-        age: payload.age.unwrap_or_default(),
-        description: payload.description,
-        location: payload.location.clone(),
-        neighborhood: payload.neighborhood.unwrap_or(payload.location),
+        name,
+        breed,
+        age,
+        description,
+        location,
+        neighborhood,
         image: cover_image,
-        images: media.clone(),
-        text_only: media.is_empty() && payload.image.is_none(),
+        images: stored_media.clone(),
+        text_only,
         author,
         likes: 0,
         comments: 0,
         shares: 0,
         urgent: is_urgent,
         created_at: "agora".into(),
-        contact: payload.contact.unwrap_or_default(),
-        tags: payload.tags.unwrap_or_default(),
-        latitude: payload.latitude.unwrap_or(-23.5505),
-        longitude: payload.longitude.unwrap_or(-46.6333),
+        contact,
+        tags,
+        latitude,
+        longitude,
     };
 
     let rescue_alert = if requires_geo_alert {
@@ -181,7 +339,7 @@ pub async fn create_post(
         StatusCode::CREATED,
         Json(CreatePostResponse {
             post,
-            media,
+            media: stored_media,
             moderation_status: "queued",
             fraud_risk: risk,
             rescue_alert,
