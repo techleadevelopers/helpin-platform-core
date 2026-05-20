@@ -330,6 +330,11 @@ async fn insert_user_with_optional_ong(
 
     let ong_record = if matches!(account_type, AccountType::Ong) {
         let legal_name = payload.name.trim().to_string();
+        let cnpj = payload
+            .cnpj
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         sqlx::query(
             r#"
             INSERT INTO ong_profiles (id, user_id, legal_name, cnpj, mission, city, state, area_type, contact_phone)
@@ -339,7 +344,7 @@ async fn insert_user_with_optional_ong(
         .bind(Uuid::now_v7())
         .bind(user_id)
         .bind(&legal_name)
-        .bind(payload.cnpj.as_deref())
+        .bind(cnpj)
         .bind(default_mission(payload.ong_type.as_deref()))
         .bind(payload.city.as_deref())
         .bind(payload.state.as_deref())
@@ -351,7 +356,7 @@ async fn insert_user_with_optional_ong(
         Some(OngRecord {
             legal_name,
             ong_type: payload.ong_type.clone(),
-            cnpj: payload.cnpj.clone(),
+            cnpj: cnpj.map(str::to_string),
             phone: payload.phone.clone(),
             city: payload.city.clone(),
             state: payload.state.clone(),
@@ -588,19 +593,25 @@ fn validate_ong_payload(
 
 fn default_mission(ong_type: Option<&str>) -> &'static str {
     match ong_type {
-        Some("rescue") => "Resgate e atendimento de animais em situaçío de risco.",
-        Some("adoption") => "Adoçío responsável e acompanhamento pós-adoçío.",
+        Some("rescue") => "Resgate e atendimento de animais em situação de risco.",
+        Some("adoption") => "Adoção responsável e acompanhamento pós-adoção.",
         Some("vet") | Some("hospital") => "Atendimento veterinário e suporte clínico.",
-        Some("welfare") => "Bem-estar animal e proteçío comunitária.",
-        _ => "Proteçío animal e apoio à comunidade.",
+        Some("welfare") => "Bem-estar animal e proteção comunitária.",
+        _ => "Proteção animal e apoio à comunidade.",
     }
 }
 
 fn fallback_ong_record(payload: &RegisterRequest, account_type: &AccountType) -> Option<OngRecord> {
+    let cnpj = payload
+        .cnpj
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     matches!(account_type, AccountType::Ong).then(|| OngRecord {
         legal_name: payload.name.clone(),
         ong_type: payload.ong_type.clone(),
-        cnpj: payload.cnpj.clone(),
+        cnpj,
         phone: payload.phone.clone(),
         city: payload.city.clone(),
         state: payload.state.clone(),
