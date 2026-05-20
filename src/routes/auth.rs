@@ -574,7 +574,7 @@ fn validate_ong_payload(
     if payload.state.as_deref().unwrap_or("").trim().len() != 2 {
         return Err(ApiError::Validation("state must be a 2-letter UF".into()));
     }
-    if let Some(cnpj) = &payload.cnpj {
+    if let Some(cnpj) = payload.cnpj.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         let digits = cnpj.chars().filter(|ch| ch.is_ascii_digit()).count();
         if digits != 14 {
             return Err(ApiError::Validation(
