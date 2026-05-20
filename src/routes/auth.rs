@@ -35,6 +35,7 @@ pub struct RegisterRequest {
     #[validate(length(min = 8))]
     pub password: String,
     pub account_type: Option<AccountType>,
+    pub avatar: Option<String>,
     pub ong_type: Option<String>,
     pub cnpj: Option<String>,
     pub phone: Option<String>,
@@ -134,6 +135,7 @@ pub async fn login(
                 "me",
                 &name,
                 &payload.email,
+                None,
                 AccountType::Person,
                 None,
             )
@@ -184,6 +186,7 @@ pub async fn register(
                 "me",
                 &payload.name,
                 &payload.email,
+                payload.avatar.as_deref(),
                 account_type.clone(),
                 fallback_ong_record(&payload, &account_type),
             )?;
@@ -266,6 +269,7 @@ struct UserRecord {
     id: Uuid,
     name: String,
     email: String,
+    avatar: Option<String>,
     password_hash: String,
     account_type: AccountType,
     verified: bool,
@@ -287,7 +291,7 @@ async fn find_user_by_email(
 ) -> Result<Option<UserRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, email, password_hash, account_type::text AS account_type, verified
+        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
         FROM users
         WHERE email = $1
         "#,
@@ -310,14 +314,15 @@ async fn insert_user_with_optional_ong(
     let user_id = Uuid::now_v7();
     let row = sqlx::query(
         r#"
-        INSERT INTO users (id, name, email, password_hash, account_type)
-        VALUES ($1, $2, $3, $4, $5::account_type)
-        RETURNING id, name, email, password_hash, account_type::text AS account_type, verified
+        INSERT INTO users (id, name, email, avatar_url, password_hash, account_type)
+        VALUES ($1, $2, $3, $4, $5, $6::account_type)
+        RETURNING id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
         "#,
     )
     .bind(user_id)
     .bind(&payload.name)
     .bind(&payload.email)
+    .bind(payload.avatar.as_deref())
     .bind(password_hash)
     .bind(account_type_str)
     .fetch_one(&mut *tx)
@@ -364,6 +369,7 @@ fn row_to_user_record(row: sqlx::postgres::PgRow) -> UserRecord {
         id: row.get("id"),
         name: row.get("name"),
         email: row.get("email"),
+        avatar: row.get("avatar_url"),
         password_hash: row.get("password_hash"),
         account_type: auth_service::account_type_from_str(row.get::<&str, _>("account_type")),
         verified: row.get("verified"),
@@ -465,6 +471,7 @@ async fn issue_auth_response(
         &record.id.to_string(),
         &record.name,
         &record.email,
+        record.avatar.as_deref(),
         record.account_type,
         record.verified,
         ong_record,
@@ -478,6 +485,7 @@ fn issue_fallback_response(
     id: &str,
     name: &str,
     email: &str,
+    avatar: Option<&str>,
     account_type: AccountType,
     ong_record: Option<OngRecord>,
 ) -> Result<AuthResponse, ApiError> {
@@ -492,6 +500,7 @@ fn issue_fallback_response(
         id,
         name,
         email,
+        avatar,
         account_type,
         false,
         ong_record,
@@ -504,6 +513,7 @@ fn auth_response(
     id: &str,
     name: &str,
     email: &str,
+    avatar: Option<&str>,
     account_type: AccountType,
     verified: bool,
     ong_record: Option<OngRecord>,
@@ -515,7 +525,7 @@ fn auth_response(
             id: id.into(),
             name: name.into(),
             email: email.into(),
-            avatar: None,
+            avatar: avatar.map(str::to_string),
             bio: "Apaixonada por animais".into(),
             account_type,
             verified,
