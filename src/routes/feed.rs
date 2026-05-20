@@ -1,9 +1,15 @@
-use axum::{extract::Query, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::Deserialize;
+use sqlx::Row;
 
 use crate::{
-    domain::{seed_posts, AccountType, Post, PostType},
+    domain::{seed_posts, AccountType, Author, Post, PostType},
+    routes::posts::{animal_type_from_str, post_type_from_str},
     services::geo::haversine_km,
+    state::AppState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -18,16 +24,23 @@ pub struct FeedQuery {
     pub limit: Option<usize>,
 }
 
-pub async fn list_feed(Query(query): Query<FeedQuery>) -> Json<Vec<Post>> {
-    Json(rank_feed(query))
+pub async fn list_feed(State(state): State<AppState>, Query(query): Query<FeedQuery>) -> Json<Vec<Post>> {
+    let db_posts = load_db_posts(&state).await.unwrap_or_else(|error| {
+        tracing::warn!(?error, "database feed unavailable; using seed feed only");
+        Vec::new()
+    });
+    Json(rank_feed(query, db_posts))
 }
 
-fn rank_feed(query: FeedQuery) -> Vec<Post> {
+fn rank_feed(query: FeedQuery, db_posts: Vec<Post>) -> Vec<Post> {
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
     let origin = query.lat.zip(query.lng);
     let radius = query.radius_km.unwrap_or(80.0).clamp(1.0, 500.0);
 
-    let mut scored: Vec<(f64, Post)> = seed_posts()
+    let mut posts = db_posts;
+    posts.extend(seed_posts());
+
+    let mut scored: Vec<(f64, Post)> = posts
         .into_iter()
         .filter(|post| {
             query
@@ -59,6 +72,92 @@ fn rank_feed(query: FeedQuery) -> Vec<Post> {
         .map(|(_, post)| post)
         .take(limit)
         .collect()
+}
+
+async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            p.id::text AS id,
+            p.post_type::text AS post_type,
+            p.animal_type,
+            COALESCE(p.name, 'Publicacao') AS name,
+            COALESCE(p.breed, '') AS breed,
+            COALESCE(p.age, '') AS age,
+            p.description,
+            COALESCE(p.location_label, '') AS location,
+            COALESCE(p.neighborhood, p.location_label, '') AS neighborhood,
+            (
+                SELECT pm.public_url
+                FROM post_media pm
+                WHERE pm.post_id = p.id
+                ORDER BY pm.sort_order ASC, pm.created_at ASC
+                LIMIT 1
+            ) AS image,
+            p.text_only,
+            p.likes_count,
+            p.comments_count,
+            p.shares_count,
+            p.urgent,
+            p.contact,
+            p.tags,
+            COALESCE(p.latitude, -23.5505) AS latitude,
+            COALESCE(p.longitude, -46.6333) AS longitude,
+            u.id::text AS author_id,
+            u.name AS author_name,
+            u.avatar_url AS author_avatar,
+            u.verified AS author_verified,
+            u.account_type::text AS author_type
+        FROM posts p
+        INNER JOIN users u ON u.id = p.author_id
+        WHERE p.moderation_status IN ('queued', 'approved', 'needs_review')
+        ORDER BY p.created_at DESC
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let author_type = match row.get::<&str, _>("author_type") {
+                "ong" => AccountType::Ong,
+                "vet" => AccountType::Vet,
+                _ => AccountType::Person,
+            };
+            Post {
+                id: row.get("id"),
+                post_type: post_type_from_str(row.get::<&str, _>("post_type")),
+                animal_type: animal_type_from_str(row.get::<&str, _>("animal_type")),
+                name: row.get("name"),
+                breed: row.get("breed"),
+                age: row.get("age"),
+                description: row.get("description"),
+                location: row.get("location"),
+                neighborhood: row.get("neighborhood"),
+                image: row.get("image"),
+                images: Vec::new(),
+                text_only: row.get("text_only"),
+                author: Author {
+                    id: row.get("author_id"),
+                    name: row.get("author_name"),
+                    avatar: row.get("author_avatar"),
+                    verified: row.get("author_verified"),
+                    account_type: author_type,
+                },
+                likes: row.get::<i32, _>("likes_count").max(0) as u32,
+                comments: row.get::<i32, _>("comments_count").max(0) as u32,
+                shares: row.get::<i32, _>("shares_count").max(0) as u32,
+                urgent: row.get("urgent"),
+                created_at: "agora".into(),
+                contact: row.get("contact"),
+                tags: row.get("tags"),
+                latitude: row.get("latitude"),
+                longitude: row.get("longitude"),
+            }
+        })
+        .collect())
 }
 
 fn feed_score(post: &Post, distance_km: Option<f64>) -> f64 {
@@ -93,7 +192,7 @@ mod tests {
             lng: Some(-46.6559),
             radius_km: Some(20.0),
             limit: Some(10),
-        });
+        }, Vec::new());
 
         assert_eq!(ranked.first().map(|post| post.id.as_str()), Some("2"));
     }
@@ -108,7 +207,7 @@ mod tests {
             lng: Some(-46.6333),
             radius_km: Some(5.0),
             limit: Some(100),
-        });
+        }, Vec::new());
 
         assert!(!ranked.iter().any(|post| post.location == "Campinas, SP"));
     }
