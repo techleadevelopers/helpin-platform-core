@@ -18,6 +18,7 @@ pub struct CreateUploadIntentRequest {
     pub file_name: String,
     pub content_type: String,
     pub size_bytes: u64,
+    pub purpose: Option<String>,
     pub checksum_sha256: Option<String>,
 }
 
@@ -107,7 +108,7 @@ pub async fn create_upload_intent(
             }
         })
         .collect::<String>();
-    let folder = format!("zoohelp/posts/{media_kind}");
+    let folder = format!("zoohelp/{}/{media_kind}", upload_purpose(payload.purpose.as_deref()));
     let public_id = format!("{upload_id}-{safe_file_name}");
     let object_key = format!("{folder}/{public_id}");
     let timestamp = chrono::Utc::now().timestamp();
@@ -149,6 +150,14 @@ fn media_kind(content_type: &str) -> Option<&'static str> {
         return Some("video");
     }
     None
+}
+
+fn upload_purpose(purpose: Option<&str>) -> &'static str {
+    match purpose {
+        Some("ong-logo") => "ong-logos",
+        Some("profile-avatar") => "profile-avatars",
+        _ => "posts",
+    }
 }
 
 fn allowed_content_types() -> Vec<&'static str> {
