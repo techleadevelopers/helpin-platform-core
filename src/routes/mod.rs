@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/observability", get(observability::status))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/register", post(auth::register))
+        .route("/v1/auth/email/verify", get(auth::verify_email))
         .route(
             "/v1/auth/password-reset",
             post(auth::request_password_reset),
@@ -126,6 +127,15 @@ mod tests {
             cloudinary_api_secret: Some("test-api-secret".into()),
             geocoding_api_provider: Some("google".into()),
             google_maps_api_key: Some("test-google-key".into()),
+            api_public_url: "https://api.zoohelp.test".into(),
+            app_public_url: "https://zoohelp.test".into(),
+            smtp_host: None,
+            smtp_port: 587,
+            smtp_user: None,
+            smtp_pass: None,
+            smtp_secure: true,
+            smtp_from_email: "no-reply@zoohelp.test".into(),
+            smtp_from_name: "ZooHelp".into(),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
         };
@@ -226,7 +236,7 @@ mod tests {
                     "postType": "adoption",
                     "animalType": "dog",
                     "description": "",
-                    "location": "São Paulo, SP"
+                    "location": "Sío Paulo, SP"
                 })
                 .to_string(),
             ))
