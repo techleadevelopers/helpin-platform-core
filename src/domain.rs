@@ -161,7 +161,7 @@ fn build_ongs() -> Vec<Ong> {
             "o1",
             "Instituto Amigos dos Animais",
             "IAA",
-            "Maior rede de proteçío animal do Brasil, com atuaçío nacional.",
+            "Maior rede de proteção animal do Brasil, com atuação nacional.",
             "Vila Mariana, Sío Paulo, SP",
             "Sío Paulo",
             "SP",
@@ -169,13 +169,13 @@ fn build_ongs() -> Vec<Ong> {
             87,
             9430,
             "(11) 99999-0001",
-            "Adoçío responsável e resgate urbano",
+            "Adoção responsável e resgate urbano",
         ),
         ong(
             "o2",
             "ONG Patinhas Felizes",
             "Patinhas",
-            "Especializada em resgate e reabilitaçío de animais ví­timas de maus-tratos.",
+            "Especializada em resgate e reabilitação de animais ví­timas de maus-tratos.",
             "Cambuí­, Campinas, SP",
             "Campinas",
             "SP",
@@ -183,7 +183,7 @@ fn build_ongs() -> Vec<Ong> {
             34,
             3210,
             "(19) 98888-0002",
-            "Combate a maus-tratos e adoçío",
+            "Combate a maus-tratos e adoção",
         ),
         ong(
             "o3",
@@ -239,7 +239,7 @@ fn build_ongs() -> Vec<Ong> {
             0,
             0,
             "(11) 94444-0006",
-            "Captaçío e distribuiçío de recursos",
+            "Captação e distribuição de recursos",
         ),
     ]
 }
@@ -252,7 +252,7 @@ fn build_posts() -> Vec<Post> {
         post("3", PostType::Lost, AnimalType::Dog, "Thor", "Golden Retriever", "4 anos", "Thor fugiu no Parque Ibirapuera. Tem coleira azul e microchip.", "Sío Paulo, SP", "Ibirapuera", authors[4].clone(), 892, 134, 567, true, "1 dia atrás", "(11) 97777-0003", &["perdido", "recompensa"], -23.5874, -46.6576),
         post("4", PostType::Found, AnimalType::Cat, "Desconhecido", "Siamês", "Adulto", "Gato siamês encontrado no Jardins, seguro e bem alimentado.", "Sío Paulo, SP", "Jardins", authors[4].clone(), 56, 12, 34, false, "3h atrás", "(11) 96666-0004", &["encontrado", "siamês"], -23.5674, -46.6694),
         post("5", PostType::Adoption, AnimalType::Dog, "Pipoca", "Poodle mix", "1 ano", "Pipoca í© alegre, brincalhío, vacinado e pronto para um novo lar.", "Campinas, SP", "Cambuí­", authors[2].clone(), 203, 41, 88, false, "5h atrás", "(19) 95555-0005", &["vacinado", "resgatado"], -22.9056, -47.0608),
-        post("6", PostType::Campaign, AnimalType::Other, "Campanha Raçío Solidária", "Todos os animais", "Vários", "Abrigo com estoque crí­tico de raçío para 85 animais.", "Sío Paulo, SP", "Mooca", authors[5].clone(), 412, 78, 305, false, "1 dia atrás", "(11) 94444-0006", &["campanha", "doaçío", "raçío"], -23.5599, -46.5978),
+        post("6", PostType::Campaign, AnimalType::Other, "Campanha Ração Solidária", "Todos os animais", "Vários", "Abrigo com estoque crí­tico de ração para 85 animais.", "Sío Paulo, SP", "Mooca", authors[5].clone(), 412, 78, 305, false, "1 dia atrás", "(11) 94444-0006", &["campanha", "doação", "ração"], -23.5599, -46.5978),
         post("post1", PostType::Post, AnimalType::Dog, "Dica de hoje", "", "", "Cíes precisam de água fresca disponí­vel o dia todo.", "Sío Paulo, SP", "Pinheiros", authors[3].clone(), 284, 37, 91, false, "1h atrás", "", &["dica", "saíºde"], -23.5663, -46.7017),
     ]
 }
@@ -267,7 +267,7 @@ fn build_conversations() -> Vec<ChatConversation> {
             "Olá! Tenho interesse em adotar a Mel.",
             "14:32",
             2,
-            "Mel - Adoçío",
+            "Mel - Adoção",
         ),
         conversation(
             "c2",
@@ -282,10 +282,10 @@ fn build_conversations() -> Vec<ChatConversation> {
             "c3",
             "6",
             authors[5].clone(),
-            "Quero contribuir com raçío. Como faí§o?",
+            "Quero contribuir com ração. Como faí§o?",
             "Ontem",
             1,
-            "Campanha Raçío Solidária",
+            "Campanha Ração Solidária",
         ),
     ]
 }
