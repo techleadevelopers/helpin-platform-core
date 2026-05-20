@@ -143,7 +143,7 @@ pub async fn create_post(
         id: uuid::Uuid::now_v7().to_string(),
         post_type,
         animal_type: payload.animal_type,
-        name: payload.name.unwrap_or_else(|| "Publicação".into()),
+        name: payload.name.unwrap_or_else(|| "Publicaçío".into()),
         breed: payload.breed.unwrap_or_default(),
         age: payload.age.unwrap_or_default(),
         description: payload.description,
