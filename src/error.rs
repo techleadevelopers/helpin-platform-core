@@ -21,6 +21,13 @@ pub enum ApiError {
     Internal,
 }
 
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> Self {
+        tracing::error!(?error, "database error");
+        ApiError::Internal
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody<'a> {
     error: &'a str,
