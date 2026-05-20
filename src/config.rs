@@ -15,6 +15,15 @@ pub struct Config {
     pub cloudinary_api_secret: Option<String>,
     pub geocoding_api_provider: Option<String>,
     pub google_maps_api_key: Option<String>,
+    pub api_public_url: String,
+    pub app_public_url: String,
+    pub smtp_host: Option<String>,
+    pub smtp_port: u16,
+    pub smtp_user: Option<String>,
+    pub smtp_pass: Option<String>,
+    pub smtp_secure: bool,
+    pub smtp_from_email: String,
+    pub smtp_from_name: String,
     pub access_token_ttl_minutes: i64,
     pub refresh_token_ttl_days: i64,
 }
@@ -42,6 +51,29 @@ impl Config {
             cloudinary_api_secret: env::var("CLOUDINARY_API_SECRET").ok(),
             geocoding_api_provider: env::var("GEOCODING_API_PROVIDER").ok(),
             google_maps_api_key: env::var("GOOGLE_MAPS_API_KEY").ok(),
+            api_public_url: env::var("API_PUBLIC_URL")
+                .or_else(|_| env::var("EXPO_PUBLIC_API_BASE_URL"))
+                .unwrap_or_else(|_| "https://zoohelp-core-production.up.railway.app".to_string()),
+            app_public_url: env::var("APP_PUBLIC_URL")
+                .unwrap_or_else(|_| "https://zoohelp.app".to_string()),
+            smtp_host: env::var("SMTP_HOST")
+                .ok()
+                .or_else(|| env::var("MTP_HOST").ok()),
+            smtp_port: env::var("SMTP_PORT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(587),
+            smtp_user: env::var("SMTP_USER").ok(),
+            smtp_pass: env::var("SMTP_PASS").ok(),
+            smtp_secure: env::var("SMTP_SECURE")
+                .ok()
+                .map(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
+                .unwrap_or(true),
+            smtp_from_email: env::var("SMTP_FROM_EMAIL")
+                .ok()
+                .or_else(|| env::var("SMTP_USER").ok())
+                .unwrap_or_else(|| "no-reply@zoohelp.app".to_string()),
+            smtp_from_name: env::var("SMTP_FROM_NAME").unwrap_or_else(|_| "ZooHelp".to_string()),
             access_token_ttl_minutes: env::var("ACCESS_TOKEN_TTL_MINUTES")
                 .ok()
                 .and_then(|value| value.parse().ok())
