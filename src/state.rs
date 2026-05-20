@@ -8,13 +8,17 @@ use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::broadcast;
 
-use crate::{config::Config, services::notifications::NotificationEngine};
+use crate::{
+    config::Config,
+    services::{email::EmailService, notifications::NotificationEngine},
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
     pub db: PgPool,
     pub chat_tx: broadcast::Sender<ChatEvent>,
+    pub email: EmailService,
     pub notifications: NotificationEngine,
     pub rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
@@ -25,11 +29,13 @@ impl AppState {
             .max_connections(10)
             .connect_lazy(&config.database_url)?;
         let (chat_tx, _) = broadcast::channel(1024);
+        let email = EmailService::new(config.clone());
 
         Ok(Self {
             config,
             db,
             chat_tx,
+            email,
             notifications: NotificationEngine::default(),
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         })
