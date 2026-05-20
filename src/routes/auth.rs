@@ -1,6 +1,9 @@
 use std::time::Duration as StdDuration;
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -69,6 +72,11 @@ pub struct AuthResponse {
 pub struct PasswordResetRequest {
     #[validate(email)]
     pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyEmailQuery {
+    pub token: String,
 }
 
 #[derive(Serialize)]
@@ -157,9 +165,12 @@ pub async fn register(
     validate_ong_payload(&payload, &account_type)?;
 
     match insert_user_with_optional_ong(&state, &payload, &account_type, &password_hash).await {
-        Ok((record, ong_profile)) => issue_auth_response(&state, record, ong_profile)
-            .await
-            .map(Json),
+        Ok((record, ong_profile)) => {
+            queue_email_verification(&state, &record).await;
+            issue_auth_response(&state, record, ong_profile)
+                .await
+                .map(Json)
+        }
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
             Err(ApiError::Conflict("email already registered".into()))
         }
@@ -168,27 +179,82 @@ pub async fn register(
                 ?error,
                 "database register path unavailable; using dev fallback"
             );
-            issue_fallback_response(
+            let response = issue_fallback_response(
                 &state,
                 "me",
                 &payload.name,
                 &payload.email,
                 account_type.clone(),
                 fallback_ong_record(&payload, &account_type),
-            )
-            .map(Json)
+            )?;
+            let token = new_action_token();
+            if let Err(error) = state
+                .email
+                .send_email_verification(&payload.email, &payload.name, &token)
+                .await
+            {
+                tracing::warn!(?error, "fallback email verification send failed");
+            }
+            Ok(Json(response))
         }
     }
 }
 
 pub async fn request_password_reset(
+    State(state): State<AppState>,
     Json(payload): Json<PasswordResetRequest>,
 ) -> Result<Json<ActionQueuedResponse>, ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
-    let _ = payload.email;
+    queue_password_reset(&state, &payload.email).await;
     Ok(Json(ActionQueuedResponse { status: "queued" }))
+}
+
+pub async fn verify_email(
+    State(state): State<AppState>,
+    Query(query): Query<VerifyEmailQuery>,
+) -> Result<Json<ActionQueuedResponse>, ApiError> {
+    if query.token.trim().is_empty() {
+        return Err(ApiError::Validation("token is required".into()));
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE users
+        SET verified = true
+        WHERE id = (
+          SELECT user_id
+          FROM email_verification_tokens
+          WHERE token = $1
+            AND used_at IS NULL
+            AND expires_at > now()
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(&query.token)
+    .fetch_optional(&state.db)
+    .await;
+
+    match result {
+        Ok(Some(row)) => {
+            let user_id: Uuid = row.get("id");
+            let _ = sqlx::query(
+                "UPDATE email_verification_tokens SET used_at = now() WHERE token = $1",
+            )
+            .bind(&query.token)
+            .execute(&state.db)
+            .await;
+            tracing::info!(%user_id, "email verified");
+            Ok(Json(ActionQueuedResponse { status: "verified" }))
+        }
+        Ok(None) => Err(ApiError::NotFound),
+        Err(error) => {
+            tracing::error!(?error, "email verification failed");
+            Err(ApiError::Internal)
+        }
+    }
 }
 
 pub async fn delete_account() -> Json<ActionQueuedResponse> {
@@ -302,6 +368,67 @@ fn row_to_user_record(row: sqlx::postgres::PgRow) -> UserRecord {
         account_type: auth_service::account_type_from_str(row.get::<&str, _>("account_type")),
         verified: row.get("verified"),
     }
+}
+
+async fn queue_email_verification(state: &AppState, record: &UserRecord) {
+    let token = new_action_token();
+    let expires_at = Utc::now() + Duration::hours(24);
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO email_verification_tokens (token, user_id, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(&token)
+    .bind(record.id)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = inserted {
+        tracing::warn!(?error, user_id = %record.id, "email verification token was not persisted");
+        return;
+    }
+
+    if let Err(error) = state
+        .email
+        .send_email_verification(&record.email, &record.name, &token)
+        .await
+    {
+        tracing::warn!(?error, user_id = %record.id, "email verification send failed");
+    }
+}
+
+async fn queue_password_reset(state: &AppState, email: &str) {
+    let Ok(Some(record)) = find_user_by_email(state, email).await else {
+        return;
+    };
+    let token = new_action_token();
+    let expires_at = Utc::now() + Duration::minutes(30);
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO password_reset_tokens (token, user_id, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(&token)
+    .bind(record.id)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = inserted {
+        tracing::warn!(?error, user_id = %record.id, "password reset token was not persisted");
+        return;
+    }
+
+    if let Err(error) = state.email.send_password_reset(&record.email, &token).await {
+        tracing::warn!(?error, user_id = %record.id, "password reset email send failed");
+    }
+}
+
+fn new_action_token() -> String {
+    format!("{}.{}", Uuid::now_v7(), Uuid::now_v7())
 }
 
 async fn issue_auth_response(
@@ -451,11 +578,11 @@ fn validate_ong_payload(
 
 fn default_mission(ong_type: Option<&str>) -> &'static str {
     match ong_type {
-        Some("rescue") => "Resgate e atendimento de animais em situação de risco.",
-        Some("adoption") => "Adoção responsável e acompanhamento pós-adoção.",
+        Some("rescue") => "Resgate e atendimento de animais em situaçío de risco.",
+        Some("adoption") => "Adoçío responsável e acompanhamento pós-adoçío.",
         Some("vet") | Some("hospital") => "Atendimento veterinário e suporte clínico.",
-        Some("welfare") => "Bem-estar animal e proteção comunitária.",
-        _ => "Proteção animal e apoio à comunidade.",
+        Some("welfare") => "Bem-estar animal e proteçío comunitária.",
+        _ => "Proteçío animal e apoio à comunidade.",
     }
 }
 
