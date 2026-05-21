@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
@@ -11,8 +11,8 @@ use validator::Validate;
 use crate::{
     domain::{seed_posts, AccountType, AnimalType, Author, Post, PostMedia, PostType},
     error::ApiError,
-    services::{auth as auth_service, fraud},
     services::notifications::RescueAlert,
+    services::{auth as auth_service, fraud},
     state::AppState,
 };
 
@@ -69,6 +69,7 @@ fn account_type_from_str(value: &str) -> AccountType {
     match value {
         "ong" => AccountType::Ong,
         "vet" => AccountType::Vet,
+        "admin" => AccountType::Admin,
         _ => AccountType::Person,
     }
 }
@@ -280,7 +281,11 @@ pub async fn create_post(
             "#,
         )
         .bind(post_id)
-        .bind(if item.content_type.starts_with("video/") { "video" } else { "image" })
+        .bind(if item.content_type.starts_with("video/") {
+            "video"
+        } else {
+            "image"
+        })
         .bind(&item.url)
         .bind(&item.url)
         .bind(&item.content_type)
