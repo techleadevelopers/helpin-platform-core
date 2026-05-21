@@ -77,6 +77,7 @@ pub fn account_type_as_str(account_type: &AccountType) -> &'static str {
         AccountType::Person => "person",
         AccountType::Ong => "ong",
         AccountType::Vet => "vet",
+        AccountType::Admin => "admin",
     }
 }
 
@@ -84,6 +85,7 @@ pub fn account_type_from_str(value: &str) -> AccountType {
     match value {
         "ong" => AccountType::Ong,
         "vet" => AccountType::Vet,
+        "admin" => AccountType::Admin,
         _ => AccountType::Person,
     }
 }
