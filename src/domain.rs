@@ -13,6 +13,7 @@ pub enum AccountType {
     Person,
     Ong,
     Vet,
+    Admin,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
