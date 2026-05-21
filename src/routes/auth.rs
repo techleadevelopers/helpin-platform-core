@@ -94,7 +94,7 @@ pub struct OngRegistrationProfile {
     pub phone: Option<String>,
     pub city: Option<String>,
     pub state: Option<String>,
-    pub verification_status: &'static str,
+    pub verification_status: String,
 }
 
 pub async fn login(
@@ -116,7 +116,14 @@ pub async fn login(
             if !auth_service::verify_password(&payload.password, &record.password_hash) {
                 return Err(ApiError::Unauthorized);
             }
-            issue_auth_response(&state, record, None).await.map(Json)
+            let ong_record = if matches!(record.account_type, AccountType::Ong) {
+                find_ong_by_user_id(&state, record.id).await?
+            } else {
+                None
+            };
+            issue_auth_response(&state, record, ong_record)
+                .await
+                .map(Json)
         }
         Ok(None) => Err(ApiError::Unauthorized),
         Err(error) => {
@@ -283,6 +290,7 @@ struct OngRecord {
     phone: Option<String>,
     city: Option<String>,
     state: Option<String>,
+    verification_status: String,
 }
 
 async fn find_user_by_email(
@@ -337,8 +345,11 @@ async fn insert_user_with_optional_ong(
             .filter(|value| !value.is_empty());
         sqlx::query(
             r#"
-            INSERT INTO ong_profiles (id, user_id, legal_name, cnpj, mission, city, state, area_type, contact_phone)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO ong_profiles (
+              id, user_id, legal_name, cnpj, mission, city, state, area_type, contact_phone,
+              verification_status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_MANUAL_REVIEW')
             "#,
         )
         .bind(Uuid::now_v7())
@@ -360,6 +371,7 @@ async fn insert_user_with_optional_ong(
             phone: payload.phone.clone(),
             city: payload.city.clone(),
             state: payload.state.clone(),
+            verification_status: "PENDING_MANUAL_REVIEW".into(),
         })
     } else {
         None
@@ -367,6 +379,34 @@ async fn insert_user_with_optional_ong(
 
     tx.commit().await?;
     Ok((row_to_user_record(row), ong_record))
+}
+
+async fn find_ong_by_user_id(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Option<OngRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT legal_name, area_type, cnpj, contact_phone, city, state, verification_status
+        FROM ong_profiles
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(row.map(|row| OngRecord {
+        legal_name: row.get("legal_name"),
+        ong_type: row.get("area_type"),
+        cnpj: row.get("cnpj"),
+        phone: row.get("contact_phone"),
+        city: row.get("city"),
+        state: row.get("state"),
+        verification_status: row.get("verification_status"),
+    }))
 }
 
 fn row_to_user_record(row: sqlx::postgres::PgRow) -> UserRecord {
@@ -525,6 +565,15 @@ fn auth_response(
     access_token: String,
     refresh_token: String,
 ) -> AuthResponse {
+    let user_verified = if matches!(&account_type, AccountType::Ong) {
+        ong_record
+            .as_ref()
+            .map(|record| record.verification_status == "APPROVED")
+            .unwrap_or(false)
+    } else {
+        verified
+    };
+
     AuthResponse {
         user: UserProfile {
             id: id.into(),
@@ -533,7 +582,7 @@ fn auth_response(
             avatar: avatar.map(str::to_string),
             bio: "Apaixonada por animais".into(),
             account_type,
-            verified,
+            verified: user_verified,
             posts_count: 0,
             helped_count: 0,
             adoptions_count: 0,
@@ -545,7 +594,7 @@ fn auth_response(
             phone: record.phone,
             city: record.city,
             state: record.state,
-            verification_status: "pending_review",
+            verification_status: record.verification_status,
         }),
         access_token,
         refresh_token,
@@ -579,7 +628,12 @@ fn validate_ong_payload(
     if payload.state.as_deref().unwrap_or("").trim().len() != 2 {
         return Err(ApiError::Validation("state must be a 2-letter UF".into()));
     }
-    if let Some(cnpj) = payload.cnpj.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(cnpj) = payload
+        .cnpj
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let digits = cnpj.chars().filter(|ch| ch.is_ascii_digit()).count();
         if digits != 14 {
             return Err(ApiError::Validation(
@@ -615,5 +669,6 @@ fn fallback_ong_record(payload: &RegisterRequest, account_type: &AccountType) ->
         phone: payload.phone.clone(),
         city: payload.city.clone(),
         state: payload.state.clone(),
+        verification_status: "PENDING_MANUAL_REVIEW".into(),
     })
 }
