@@ -1,10 +1,11 @@
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 
 use crate::state::AppState;
 
+mod admin;
 mod ai;
 mod auth;
 mod chat;
@@ -36,6 +37,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/auth/password-reset",
             post(auth::request_password_reset),
+        )
+        .route(
+            "/v1/admin/ongs/pending-verification",
+            get(admin::pending_ongs),
+        )
+        .route(
+            "/v1/admin/ongs/:id/verification-status",
+            patch(admin::update_ong_verification_status),
         )
         .route("/v1/me", delete(auth::delete_account))
         .route("/v1/feed", get(feed::list_feed))
