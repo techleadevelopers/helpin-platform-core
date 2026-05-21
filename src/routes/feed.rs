@@ -24,7 +24,10 @@ pub struct FeedQuery {
     pub limit: Option<usize>,
 }
 
-pub async fn list_feed(State(state): State<AppState>, Query(query): Query<FeedQuery>) -> Json<Vec<Post>> {
+pub async fn list_feed(
+    State(state): State<AppState>,
+    Query(query): Query<FeedQuery>,
+) -> Json<Vec<Post>> {
     let db_posts = load_db_posts(&state).await.unwrap_or_else(|error| {
         tracing::warn!(?error, "database feed unavailable; using seed feed only");
         Vec::new()
@@ -184,30 +187,36 @@ mod tests {
 
     #[test]
     fn prioritizes_nearby_urgent_cases_for_logged_user_location() {
-        let ranked = rank_feed(FeedQuery {
-            post_type: None,
-            author_type: None,
-            urgent: None,
-            lat: Some(-23.5614),
-            lng: Some(-46.6559),
-            radius_km: Some(20.0),
-            limit: Some(10),
-        }, Vec::new());
+        let ranked = rank_feed(
+            FeedQuery {
+                post_type: None,
+                author_type: None,
+                urgent: None,
+                lat: Some(-23.5614),
+                lng: Some(-46.6559),
+                radius_km: Some(20.0),
+                limit: Some(10),
+            },
+            Vec::new(),
+        );
 
         assert_eq!(ranked.first().map(|post| post.id.as_str()), Some("2"));
     }
 
     #[test]
     fn filters_by_radius() {
-        let ranked = rank_feed(FeedQuery {
-            post_type: None,
-            author_type: None,
-            urgent: None,
-            lat: Some(-23.5505),
-            lng: Some(-46.6333),
-            radius_km: Some(5.0),
-            limit: Some(100),
-        }, Vec::new());
+        let ranked = rank_feed(
+            FeedQuery {
+                post_type: None,
+                author_type: None,
+                urgent: None,
+                lat: Some(-23.5505),
+                lng: Some(-46.6333),
+                radius_km: Some(5.0),
+                limit: Some(100),
+            },
+            Vec::new(),
+        );
 
         assert!(!ranked.iter().any(|post| post.location == "Campinas, SP"));
     }
