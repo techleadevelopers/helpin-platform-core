@@ -121,10 +121,12 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{config::Config, state::AppState};
+    use crate::{
+        config::Config, domain::AccountType, services::auth as auth_service, state::AppState,
+    };
 
-    async fn test_app() -> Router {
-        let config = Config {
+    fn test_config() -> Config {
+        Config {
             bind_addr: "127.0.0.1:0".into(),
             database_url: "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into(),
             redis_url: "redis://localhost:6379".into(),
@@ -147,7 +149,22 @@ mod tests {
             smtp_from_name: "ZooHelp".into(),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
-        };
+        }
+    }
+
+    fn test_auth_header(account_type: AccountType) -> String {
+        let token = auth_service::issue_access_token(
+            &test_config(),
+            "018f0000-0000-7000-8000-000000000001",
+            "admin@zoohelp.test",
+            account_type,
+        )
+        .expect("test token");
+        format!("Bearer {token}")
+    }
+
+    async fn test_app() -> Router {
+        let config = test_config();
         let state = AppState::new(config).await.expect("test state");
         router(state)
     }
@@ -263,6 +280,7 @@ mod tests {
             .method(Method::POST)
             .uri("/v1/posts")
             .header("content-type", "application/json")
+            .header("authorization", test_auth_header(AccountType::Ong))
             .body(Body::from(
                 json!({
                     "name": "Mel",
@@ -302,6 +320,7 @@ mod tests {
             .method(Method::POST)
             .uri("/v1/posts")
             .header("content-type", "application/json")
+            .header("authorization", test_auth_header(AccountType::Ong))
             .body(Body::from(
                 json!({
                     "name": "Pedido de ajuda",
@@ -327,6 +346,7 @@ mod tests {
             .method(Method::POST)
             .uri("/v1/posts")
             .header("content-type", "application/json")
+            .header("authorization", test_auth_header(AccountType::Ong))
             .body(Body::from(
                 json!({
                     "name": "Pedido de ajuda",
