@@ -11,6 +11,8 @@ pub enum ApiError {
     Validation(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("too many requests")]
@@ -39,6 +41,7 @@ impl IntoResponse for ApiError {
         let status = match self {
             ApiError::Validation(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::NotFound => StatusCode::NOT_FOUND,
