@@ -26,6 +26,74 @@ pub struct UpdateAdminUserRequest {
     pub phone: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateKybDocumentRequest {
+    pub document_type: String,
+    pub object_key: String,
+    pub public_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewKybDocumentRequest {
+    pub status: String,
+    pub rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewModerationJobRequest {
+    pub status: String,
+    pub score: Option<i16>,
+    pub labels: Option<Vec<String>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KybDocument {
+    pub id: String,
+    pub ong_id: String,
+    pub document_type: String,
+    pub object_key: String,
+    pub public_url: String,
+    pub status: String,
+    pub reviewer_user_id: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModerationJob {
+    pub id: String,
+    pub subject_type: String,
+    pub subject_id: String,
+    pub image_url: Option<String>,
+    pub status: String,
+    pub score: Option<i16>,
+    pub labels: Vec<String>,
+    pub provider: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostReport {
+    pub id: String,
+    pub post_id: String,
+    pub reporter_user_id: String,
+    pub reason: String,
+    pub details: Option<String>,
+    pub severity: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminOngProfile {
@@ -333,6 +401,162 @@ pub async fn update_ong_verification_status(
     Ok(Json(row_to_admin_ong(row)))
 }
 
+pub async fn list_kyb_documents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<KybDocument>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, ong_id, document_type, object_key, public_url, status,
+               reviewer_user_id, rejection_reason, created_at, reviewed_at
+        FROM ong_kyb_documents
+        WHERE ong_id = $1
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows.into_iter().map(row_to_kyb_document).collect()))
+}
+
+pub async fn create_kyb_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<CreateKybDocumentRequest>,
+) -> Result<Json<KybDocument>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO ong_kyb_documents (ong_id, document_type, object_key, public_url)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, ong_id, document_type, object_key, public_url, status,
+                  reviewer_user_id, rejection_reason, created_at, reviewed_at
+        "#,
+    )
+    .bind(id)
+    .bind(payload.document_type.trim())
+    .bind(payload.object_key.trim())
+    .bind(payload.public_url.trim())
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(row_to_kyb_document(row)))
+}
+
+pub async fn review_kyb_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(document_id): Path<Uuid>,
+    Json(payload): Json<ReviewKybDocumentRequest>,
+) -> Result<Json<KybDocument>, ApiError> {
+    let admin = authenticate_admin(&state, &headers)?;
+    let reviewer_id = Uuid::parse_str(&admin.sub).map_err(|_| ApiError::Unauthorized)?;
+    let status = normalize_review_status(&payload.status)?;
+    let row = sqlx::query(
+        r#"
+        UPDATE ong_kyb_documents
+        SET status = $1,
+            reviewer_user_id = $2,
+            rejection_reason = CASE WHEN $1 = 'approved' THEN NULL ELSE $3 END,
+            reviewed_at = now()
+        WHERE id = $4
+        RETURNING id, ong_id, document_type, object_key, public_url, status,
+                  reviewer_user_id, rejection_reason, created_at, reviewed_at
+        "#,
+    )
+    .bind(status)
+    .bind(reviewer_id)
+    .bind(payload.rejection_reason.as_deref())
+    .bind(document_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(row_to_kyb_document(row)))
+}
+
+pub async fn list_moderation_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ModerationJob>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, subject_type, subject_id, image_url, status, score, labels,
+               provider, error, created_at, updated_at
+        FROM moderation_jobs
+        WHERE status IN ('queued', 'needs_review')
+        ORDER BY created_at ASC
+        LIMIT 200
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows.into_iter().map(row_to_moderation_job).collect()))
+}
+
+pub async fn review_moderation_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<ReviewModerationJobRequest>,
+) -> Result<Json<ModerationJob>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    let status = normalize_moderation_status(&payload.status)?;
+    let labels = payload.labels.unwrap_or_default();
+    let row = sqlx::query(
+        r#"
+        UPDATE moderation_jobs
+        SET status = $1,
+            score = $2,
+            labels = $3,
+            error = $4,
+            updated_at = now()
+        WHERE id = $5
+        RETURNING id, subject_type, subject_id, image_url, status, score, labels,
+                  provider, error, created_at, updated_at
+        "#,
+    )
+    .bind(status)
+    .bind(payload.score)
+    .bind(labels)
+    .bind(payload.error)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(row_to_moderation_job(row)))
+}
+
+pub async fn list_post_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PostReport>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, post_id, reporter_user_id, reason, details, severity, status, created_at
+        FROM post_reports
+        WHERE status = 'queued_review'
+        ORDER BY
+          CASE WHEN severity = 'high' THEN 0 ELSE 1 END,
+          created_at ASC
+        LIMIT 200
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows.into_iter().map(row_to_post_report).collect()))
+}
+
 fn authenticate_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -362,6 +586,26 @@ fn normalize_status(value: &str) -> Option<&'static str> {
         "REJECTED" => Some("REJECTED"),
         "BLOCKED" => Some("BLOCKED"),
         _ => None,
+    }
+}
+
+fn normalize_review_status(value: &str) -> Result<&'static str, ApiError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "pending" | "pending_review" => Ok("pending_review"),
+        "approved" => Ok("approved"),
+        "rejected" => Ok("rejected"),
+        _ => Err(ApiError::Validation("invalid review status".into())),
+    }
+}
+
+fn normalize_moderation_status(value: &str) -> Result<&'static str, ApiError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "queued" => Ok("queued"),
+        "approved" => Ok("approved"),
+        "rejected" => Ok("rejected"),
+        "needs_review" => Ok("needs_review"),
+        "failed" => Ok("failed"),
+        _ => Err(ApiError::Validation("invalid moderation status".into())),
     }
 }
 
@@ -427,5 +671,51 @@ fn row_to_admin_user(row: sqlx::postgres::PgRow) -> AdminUserProfile {
         total_spent: "0.00".into(),
         created_at,
         updated_at: created_at,
+    }
+}
+
+fn row_to_kyb_document(row: sqlx::postgres::PgRow) -> KybDocument {
+    KybDocument {
+        id: row.get::<Uuid, _>("id").to_string(),
+        ong_id: row.get::<Uuid, _>("ong_id").to_string(),
+        document_type: row.get("document_type"),
+        object_key: row.get("object_key"),
+        public_url: row.get("public_url"),
+        status: row.get("status"),
+        reviewer_user_id: row
+            .get::<Option<Uuid>, _>("reviewer_user_id")
+            .map(|value| value.to_string()),
+        rejection_reason: row.get("rejection_reason"),
+        created_at: row.get("created_at"),
+        reviewed_at: row.get("reviewed_at"),
+    }
+}
+
+fn row_to_moderation_job(row: sqlx::postgres::PgRow) -> ModerationJob {
+    ModerationJob {
+        id: row.get::<Uuid, _>("id").to_string(),
+        subject_type: row.get("subject_type"),
+        subject_id: row.get("subject_id"),
+        image_url: row.get("image_url"),
+        status: row.get("status"),
+        score: row.get("score"),
+        labels: row.get("labels"),
+        provider: row.get("provider"),
+        error: row.get("error"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_post_report(row: sqlx::postgres::PgRow) -> PostReport {
+    PostReport {
+        id: row.get::<Uuid, _>("id").to_string(),
+        post_id: row.get::<Uuid, _>("post_id").to_string(),
+        reporter_user_id: row.get::<Uuid, _>("reporter_user_id").to_string(),
+        reason: row.get("reason"),
+        details: row.get("details"),
+        severity: row.get("severity"),
+        status: row.get("status"),
+        created_at: row.get("created_at"),
     }
 }
