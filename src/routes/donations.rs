@@ -1,8 +1,4 @@
-use axum::{
-    extract::State,
-    http::HeaderMap,
-    Json,
-};
+use axum::{extract::State, http::HeaderMap, Json};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
@@ -135,7 +131,9 @@ fn row_to_response(row: sqlx::postgres::PgRow) -> DonationIntentResponse {
 fn normalize_currency(value: Option<&str>) -> Result<String, ApiError> {
     let currency = value.unwrap_or("BRL").trim().to_ascii_uppercase();
     if currency.len() != 3 || !currency.chars().all(|ch| ch.is_ascii_uppercase()) {
-        return Err(ApiError::Validation("currency must be ISO-4217 alpha-3".into()));
+        return Err(ApiError::Validation(
+            "currency must be ISO-4217 alpha-3".into(),
+        ));
     }
     Ok(currency)
 }
