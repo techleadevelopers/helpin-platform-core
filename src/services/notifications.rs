@@ -319,13 +319,14 @@ pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<()
 
     for recipient in &alert.recipients {
         let user_id = Uuid::parse_str(&recipient.user_id).ok();
-        sqlx::query(
+        let event_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO notification_events (
               user_id, kind, title, body, post_id, image_url, distance_km, critical,
               deeplink, dedupe_key, ttl_seconds, category, payload
             )
             VALUES ($1, 'rescue_alert', $2, $3, $4, $5, $6, $7, $8, $9, 900, 'rescue', $10)
+            RETURNING id
             "#,
         )
         .bind(user_id)
@@ -343,6 +344,28 @@ pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<()
             "platform": push_platform_as_str(&recipient.platform),
             "deliveryStatus": recipient.delivery_status,
             "radiusKm": alert.radius_km
+        }))
+        .fetch_one(db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO push_delivery_jobs (
+              notification_event_id, user_id, push_token, platform, payload
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(&recipient.push_token)
+        .bind(push_platform_as_str(&recipient.platform))
+        .bind(serde_json::json!({
+            "title": alert.title,
+            "body": alert.body,
+            "deeplink": format!("zoohelp://post/{}", alert.post_id),
+            "postId": alert.post_id,
+            "critical": alert.critical
         }))
         .execute(db)
         .await?;
