@@ -1,18 +1,11 @@
-CREATE EXTENSION IF NOT EXISTS postgis;
-
 ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS anonymized_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS retention_delete_after timestamptz;
 
-ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo geography(Point, 4326);
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS idempotency_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx
   ON posts (author_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
-UPDATE posts
-SET geo = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography
-WHERE geo IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL;
-CREATE INDEX IF NOT EXISTS posts_geo_gist_idx ON posts USING gist (geo);
 
 CREATE TABLE IF NOT EXISTS post_likes (
   post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
