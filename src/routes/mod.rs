@@ -53,6 +53,23 @@ pub fn router(state: AppState) -> Router {
             "/v1/admin/ongs/:id/verification-status",
             patch(admin::update_ong_verification_status),
         )
+        .route(
+            "/v1/admin/ongs/:id/kyb-documents",
+            get(admin::list_kyb_documents).post(admin::create_kyb_document),
+        )
+        .route(
+            "/v1/admin/kyb-documents/:id/review",
+            patch(admin::review_kyb_document),
+        )
+        .route(
+            "/v1/admin/moderation/jobs",
+            get(admin::list_moderation_jobs),
+        )
+        .route(
+            "/v1/admin/moderation/jobs/:id",
+            patch(admin::review_moderation_job),
+        )
+        .route("/v1/admin/reports/posts", get(admin::list_post_reports))
         .route("/v1/me", get(auth::me).delete(auth::delete_account))
         .route("/v1/me/avatar", patch(auth::update_avatar))
         .route("/v1/feed", get(feed::list_feed))
@@ -78,6 +95,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ongs/:id", get(ongs::get_ong))
         .route("/v1/ongs/:id/follow", post(ongs::follow_ong))
         .route("/v1/donations/intents", post(donations::create_intent))
+        .route(
+            "/v1/donations/webhooks/:provider",
+            post(donations::payment_webhook),
+        )
         .route("/v1/trust/score/:subject_id", get(trust::score))
         .route("/v1/notifications", get(notifications::list_notifications))
         .route(
@@ -165,6 +186,11 @@ mod tests {
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
             cors_allowed_origins: Vec::new(),
+            payment_provider: "test".into(),
+            payment_webhook_secret: Some("test-webhook-secret-123456".into()),
+            sentry_dsn: None,
+            push_worker_enabled: false,
+            push_provider: "expo".into(),
         }
     }
 
