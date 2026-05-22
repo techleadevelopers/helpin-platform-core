@@ -32,7 +32,7 @@ impl AppState {
             .min_connections(config.database_min_connections)
             .acquire_timeout(Duration::from_secs(5))
             .connect_lazy(&config.database_url)?;
-        ensure_runtime_schema(&db).await?;
+        ensure_runtime_schema(&db, config.postgis_enabled).await?;
 
         let (chat_tx, _) = broadcast::channel(1024);
         let (rescue_tx, _) = broadcast::channel(4096);
@@ -59,11 +59,8 @@ impl AppState {
     }
 }
 
-async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
-    let statements = [
-        r#"
-        CREATE EXTENSION IF NOT EXISTS postgis;
-        "#,
+async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Result<()> {
+    let base_statements = [
         r#"
         DO $$
         BEGIN
@@ -93,11 +90,8 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "ALTER TABLE posts ALTER COLUMN moderation_status SET DEFAULT 'approved';",
         "UPDATE posts SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100);",
-        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo geography(Point, 4326);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS idempotency_key text;",
         "CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx ON posts (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
-        "UPDATE posts SET geo = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography WHERE geo IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL;",
-        "CREATE INDEX IF NOT EXISTS posts_geo_gist_idx ON posts USING gist (geo);",
         r#"
         CREATE TABLE IF NOT EXISTS media_upload_intents (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -352,8 +346,19 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS moderation_jobs_status_created_idx ON moderation_jobs (status, created_at);",
     ];
 
-    for statement in statements {
+    for statement in base_statements {
         sqlx::query(statement).execute(db).await?;
+    }
+
+    if postgis_enabled {
+        for statement in [
+            "CREATE EXTENSION IF NOT EXISTS postgis;",
+            "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo geography(Point, 4326);",
+            "UPDATE posts SET geo = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography WHERE geo IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL;",
+            "CREATE INDEX IF NOT EXISTS posts_geo_gist_idx ON posts USING gist (geo);",
+        ] {
+            sqlx::query(statement).execute(db).await?;
+        }
     }
 
     Ok(())
