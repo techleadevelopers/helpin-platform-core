@@ -213,6 +213,8 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS rescue_sessions_location_idx ON rescue_sessions (lat, lng) WHERE status = 'active';",
         "CREATE INDEX IF NOT EXISTS rescue_location_points_rescue_recorded_idx ON rescue_location_points (rescue_id, recorded_at DESC);",
         "CREATE INDEX IF NOT EXISTS rescue_incidents_rescue_created_idx ON rescue_incidents (rescue_id, created_at DESC);",
+        "ALTER TABLE donations ADD COLUMN IF NOT EXISTS idempotency_key text;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS donations_donor_idempotency_idx ON donations (donor_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS donation_ledger_entries (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
