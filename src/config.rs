@@ -6,6 +6,8 @@ use anyhow::Context;
 pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
+    pub database_max_connections: u32,
+    pub database_min_connections: u32,
     pub redis_url: String,
     pub nats_url: String,
     pub ai_worker_url: String,
@@ -36,6 +38,14 @@ impl Config {
                 .or_else(|_| env::var("BIND_ADDR"))
                 .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
             database_url: env::var("DATABASE_URL").context("DATABASE_URL is required")?,
+            database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(20),
+            database_min_connections: env::var("DATABASE_MIN_CONNECTIONS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1),
             redis_url: env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
             nats_url: env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string()),
