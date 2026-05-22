@@ -93,7 +93,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/notifications/rescue-alerts/:post_id/preview",
             post(notifications::preview_rescue_alert),
         )
-        .route("/v1/rescue/active", post(rescue::trigger))
+        .route(
+            "/v1/rescue/active",
+            get(rescue::list_active).post(rescue::trigger),
+        )
         .route(
             "/v1/rescue/active/:id/location",
             axum::routing::patch(rescue::update_location),
@@ -103,6 +106,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(rescue::end),
         )
         .route("/v1/rescue/active/:id/incident", post(rescue::incident))
+        .route("/v1/rescue/active/:id/ws", get(rescue::rescue_ws))
         .route("/v1/support/meta", get(support::meta))
         .route(
             "/v1/support/tickets",
