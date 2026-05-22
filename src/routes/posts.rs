@@ -9,8 +9,9 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    domain::{seed_posts, AccountType, AnimalType, Author, Post, PostMedia, PostType},
+    domain::{AccountType, AnimalType, Author, Post, PostMedia, PostType},
     error::ApiError,
+    routes::auth::audit_event,
     services::notifications::{dispatch_persistent_rescue_alert, RescueAlert},
     services::{auth as auth_service, fraud},
     state::AppState,
@@ -180,7 +181,7 @@ pub struct CommentResponse {
     pub id: String,
     pub post_id: String,
     pub body: String,
-    pub created_at: &'static str,
+    pub created_at: String,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -209,6 +210,34 @@ pub async fn create_post(
 
     let claims = authenticate_request(&state, &headers)?;
     let author_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(key) = idempotency_key {
+        if let Some(existing_id) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM posts WHERE author_id = $1 AND idempotency_key = $2",
+        )
+        .bind(author_id)
+        .bind(key)
+        .fetch_optional(&state.db)
+        .await?
+        {
+            if let Some(post) = load_post_by_id(&state, existing_id).await? {
+                return Ok((
+                    StatusCode::OK,
+                    Json(CreatePostResponse {
+                        post,
+                        media: Vec::new(),
+                        moderation_status: "approved",
+                        fraud_risk: 0,
+                        rescue_alert: None,
+                    }),
+                ));
+            }
+        }
+    }
     let media = normalize_media(&payload)?;
     let risk = fraud::score_post_text(&payload.description);
     let author = load_author(&state, author_id).await?;
@@ -238,14 +267,54 @@ pub async fn create_post(
     let text_only = media.is_empty() && payload.image.is_none();
 
     let mut tx = state.db.begin().await?;
+    for (index, item) in media.iter().enumerate() {
+        let upload_ref = payload
+            .images
+            .get(index)
+            .and_then(|image| {
+                image
+                    .object_key
+                    .as_ref()
+                    .or(image.public_url.as_ref())
+                    .or(image.url.as_ref())
+            })
+            .unwrap_or(&item.url);
+        let result = sqlx::query(
+            r#"
+            UPDATE media_upload_intents
+            SET consumed_at = COALESCE(consumed_at, now())
+            WHERE user_id = $1
+              AND consumed_at IS NULL
+              AND expires_at > now()
+              AND (object_key = $2 OR public_url = $2)
+            "#,
+        )
+        .bind(author_id)
+        .bind(upload_ref)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(ApiError::Validation(
+                "media must come from an unconsumed upload intent owned by the authenticated user"
+                    .into(),
+            ));
+        }
+    }
+
     let post_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO posts (
             author_id, post_type, animal_type, name, breed, age, description,
             latitude, longitude, location_label, neighborhood, contact, tags,
-            urgent, text_only, moderation_status, fraud_risk
+            urgent, text_only, moderation_status, fraud_risk, geo, idempotency_key
         )
-        VALUES ($1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'approved', $16)
+        VALUES (
+            $1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, 'approved', $16,
+            ST_SetSRID(ST_MakePoint($9, $8), 4326)::geography,
+            $17
+        )
         RETURNING id
         "#,
     )
@@ -265,6 +334,7 @@ pub async fn create_post(
     .bind(is_urgent)
     .bind(text_only)
     .bind(i16::from(risk))
+    .bind(idempotency_key)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -421,26 +491,63 @@ fn normalize_media(payload: &CreatePostRequest) -> Result<Vec<PostMedia>, ApiErr
         .collect()
 }
 
-pub async fn get_post(Path(id): Path<String>) -> Result<Json<Post>, ApiError> {
-    seed_posts()
-        .into_iter()
-        .find(|post| post.id == id)
+pub async fn get_post(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Post>, ApiError> {
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    load_post_by_id(&state, post_id)
+        .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
 }
 
-pub async fn toggle_like(Path(id): Path<String>) -> Result<Json<LikeResponse>, ApiError> {
-    if seed_posts().iter().any(|post| post.id == id) {
-        return Ok(Json(LikeResponse {
-            post_id: id,
-            liked: true,
-        }));
-    }
+pub async fn toggle_like(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<LikeResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
 
-    Err(ApiError::NotFound)
+    let mut tx = state.db.begin().await?;
+    let deleted = sqlx::query("DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2")
+        .bind(post_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    let liked = if deleted.rows_affected() == 0 {
+        sqlx::query("INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)")
+            .bind(post_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        true
+    } else {
+        false
+    };
+    sqlx::query(
+        r#"
+        UPDATE posts
+        SET likes_count = (
+          SELECT COUNT(*)::int FROM post_likes WHERE post_id = $1
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(post_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(Json(LikeResponse { post_id: id, liked }))
 }
 
 pub async fn create_comment(
+    headers: HeaderMap,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(payload): Json<CommentRequest>,
 ) -> Result<(StatusCode, Json<CommentResponse>), ApiError> {
@@ -448,40 +555,215 @@ pub async fn create_comment(
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
 
-    if !seed_posts().iter().any(|post| post.id == id) {
-        return Err(ApiError::NotFound);
-    }
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
+
+    let mut tx = state.db.begin().await?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO post_comments (post_id, user_id, body)
+        VALUES ($1, $2, $3)
+        RETURNING id, created_at
+        "#,
+    )
+    .bind(post_id)
+    .bind(user_id)
+    .bind(&payload.body)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE posts
+        SET comments_count = (
+          SELECT COUNT(*)::int FROM post_comments WHERE post_id = $1
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(post_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     Ok((
         StatusCode::CREATED,
         Json(CommentResponse {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: row.get::<Uuid, _>("id").to_string(),
             post_id: id,
             body: payload.body,
-            created_at: "agora",
+            created_at: row
+                .get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .to_rfc3339(),
         }),
     ))
 }
 
 pub async fn report_post(
+    headers: HeaderMap,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(payload): Json<ReportRequest>,
 ) -> Result<(StatusCode, Json<ReportResponse>), ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
-    let _ = payload.details.as_deref();
 
-    if !seed_posts().iter().any(|post| post.id == id) {
-        return Err(ApiError::NotFound);
-    }
+    let claims = authenticate_request(&state, &headers)?;
+    let reporter_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
+
+    let severity = report_severity(&payload.reason, payload.details.as_deref());
+    let report_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO post_reports (id, post_id, reporter_user_id, reason, details, severity)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(report_id)
+    .bind(post_id)
+    .bind(reporter_id)
+    .bind(&payload.reason)
+    .bind(payload.details.as_deref())
+    .bind(severity)
+    .execute(&state.db)
+    .await?;
+
+    audit_event(
+        &state,
+        Some(reporter_id),
+        "trust.post.reported",
+        serde_json::json!({ "postId": post_id, "reportId": report_id, "severity": severity }),
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
         Json(ReportResponse {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: report_id.to_string(),
             post_id: id,
             status: "queued_review",
         }),
     ))
+}
+
+async fn ensure_post_exists(state: &AppState, post_id: Uuid) -> Result<(), ApiError> {
+    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM posts WHERE id = $1")
+        .bind(post_id)
+        .fetch_optional(&state.db)
+        .await?;
+    exists.map(|_| ()).ok_or(ApiError::NotFound)
+}
+
+pub(crate) async fn load_post_by_id(
+    state: &AppState,
+    post_id: Uuid,
+) -> Result<Option<Post>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            p.id::text AS id,
+            p.post_type::text AS post_type,
+            p.animal_type,
+            COALESCE(p.name, 'Publicacao') AS name,
+            COALESCE(p.breed, '') AS breed,
+            COALESCE(p.age, '') AS age,
+            p.description,
+            COALESCE(p.location_label, '') AS location,
+            COALESCE(p.neighborhood, p.location_label, '') AS neighborhood,
+            (
+                SELECT pm.public_url
+                FROM post_media pm
+                WHERE pm.post_id = p.id
+                ORDER BY pm.sort_order ASC, pm.created_at ASC
+                LIMIT 1
+            ) AS image,
+            p.text_only,
+            p.likes_count,
+            p.comments_count,
+            p.shares_count,
+            p.urgent,
+            p.created_at,
+            p.contact,
+            p.tags,
+            COALESCE(p.latitude, -23.5505) AS latitude,
+            COALESCE(p.longitude, -46.6333) AS longitude,
+            u.id::text AS author_id,
+            u.name AS author_name,
+            u.avatar_url AS author_avatar,
+            u.verified AS author_verified,
+            u.account_type::text AS author_type
+        FROM posts p
+        INNER JOIN users u ON u.id = p.author_id
+        WHERE p.id = $1
+          AND p.moderation_status = 'approved'
+          AND u.deleted_at IS NULL
+        "#,
+    )
+    .bind(post_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(row.map(|row| {
+        let author_type = match row.get::<&str, _>("author_type") {
+            "ong" => AccountType::Ong,
+            "vet" => AccountType::Vet,
+            "admin" => AccountType::Admin,
+            _ => AccountType::Person,
+        };
+        Post {
+            id: row.get("id"),
+            post_type: post_type_from_str(row.get::<&str, _>("post_type")),
+            animal_type: animal_type_from_str(row.get::<&str, _>("animal_type")),
+            name: row.get("name"),
+            breed: row.get("breed"),
+            age: row.get("age"),
+            description: row.get("description"),
+            location: row.get("location"),
+            neighborhood: row.get("neighborhood"),
+            image: row.get("image"),
+            images: Vec::new(),
+            text_only: row.get("text_only"),
+            author: Author {
+                id: row.get("author_id"),
+                name: row.get("author_name"),
+                avatar: row.get("author_avatar"),
+                verified: row.get("author_verified"),
+                account_type: author_type,
+            },
+            likes: row.get::<i32, _>("likes_count").max(0) as u32,
+            comments: row.get::<i32, _>("comments_count").max(0) as u32,
+            shares: row.get::<i32, _>("shares_count").max(0) as u32,
+            urgent: row.get("urgent"),
+            created_at: row
+                .get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .to_rfc3339(),
+            contact: row.get("contact"),
+            tags: row.get("tags"),
+            latitude: row.get("latitude"),
+            longitude: row.get("longitude"),
+        }
+    }))
+}
+
+fn report_severity(reason: &str, details: Option<&str>) -> &'static str {
+    let text = format!("{} {}", reason, details.unwrap_or_default()).to_lowercase();
+    if [
+        "maus-tratos",
+        "trafico",
+        "tráfico",
+        "violencia",
+        "golpe",
+        "scam",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        "high"
+    } else {
+        "normal"
+    }
 }
