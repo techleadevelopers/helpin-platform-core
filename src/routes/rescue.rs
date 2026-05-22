@@ -14,6 +14,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
+    domain::AccountType,
     error::ApiError,
     services::auth as auth_service,
     state::{AppState, RescueEvent},
@@ -26,6 +27,10 @@ const ACTIVE_RESCUE_LIMIT: i64 = 200;
 pub struct RescueSession {
     pub id: String,
     pub post_id: String,
+    pub reporter_user_id: Option<String>,
+    pub reporter_name: Option<String>,
+    pub reporter_email: Option<String>,
+    pub reporter_role: Option<String>,
     pub status: String,
     pub lat: f64,
     pub lng: f64,
@@ -77,14 +82,30 @@ pub struct IncidentResponse {
 }
 
 pub async fn list_active(
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<RescueSession>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+
     let rows = sqlx::query(
         r#"
-        SELECT id, post_id, status, lat, lng, accuracy, created_at, updated_at
-        FROM rescue_sessions
-        WHERE status = 'active'
-        ORDER BY updated_at DESC
+        SELECT
+          rs.id,
+          rs.post_id,
+          rs.reporter_user_id,
+          u.name AS reporter_name,
+          u.email::text AS reporter_email,
+          u.account_type::text AS reporter_role,
+          rs.status,
+          rs.lat,
+          rs.lng,
+          rs.accuracy,
+          rs.created_at,
+          rs.updated_at
+        FROM rescue_sessions rs
+        LEFT JOIN users u ON u.id = rs.reporter_user_id
+        WHERE rs.status = 'active'
+        ORDER BY rs.updated_at DESC
         LIMIT $1
         "#,
     )
@@ -109,7 +130,7 @@ pub async fn trigger(
         r#"
         INSERT INTO rescue_sessions (id, post_id, reporter_user_id, status, lat, lng, accuracy)
         VALUES ($1, $2, $3, 'active', $4, $5, $6)
-        RETURNING id, post_id, status, lat, lng, accuracy, created_at, updated_at
+        RETURNING id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at
         "#,
     )
     .bind(Uuid::now_v7())
@@ -148,7 +169,7 @@ pub async fn update_location(
             updated_at = now()
         WHERE id = $1
           AND status = 'active'
-        RETURNING id, post_id, status, lat, lng, accuracy, created_at, updated_at
+        RETURNING id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at
         "#,
     )
     .bind(id)
@@ -178,7 +199,7 @@ pub async fn end(
             updated_at = now(),
             ended_at = COALESCE(ended_at, now())
         WHERE id = $1
-        RETURNING id, post_id, status, lat, lng, accuracy, created_at, updated_at
+        RETURNING id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at
         "#,
     )
     .bind(id)
@@ -325,6 +346,15 @@ fn row_to_rescue(row: sqlx::postgres::PgRow) -> RescueSession {
     RescueSession {
         id: row.get::<Uuid, _>("id").to_string(),
         post_id: row.get("post_id"),
+        reporter_user_id: optional_uuid(&row, "reporter_user_id"),
+        reporter_name: optional_string(&row, "reporter_name"),
+        reporter_email: optional_string(&row, "reporter_email"),
+        reporter_role: optional_string(&row, "reporter_role").map(|role| match role.as_str() {
+            "admin" => "ADMIN".to_string(),
+            "ong" => "ONG".to_string(),
+            "vet" => "VET".to_string(),
+            _ => "USER".to_string(),
+        }),
         status: row.get("status"),
         lat: row.get("lat"),
         lng: row.get("lng"),
@@ -336,6 +366,17 @@ fn row_to_rescue(row: sqlx::postgres::PgRow) -> RescueSession {
             .get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
             .to_rfc3339(),
     }
+}
+
+fn optional_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
+    row.try_get::<Option<Uuid>, _>(column)
+        .ok()
+        .flatten()
+        .map(|value| value.to_string())
+}
+
+fn optional_string(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
+    row.try_get::<Option<String>, _>(column).ok().flatten()
 }
 
 fn broadcast_rescue_event(state: &AppState, rescue: &RescueSession) {
@@ -363,4 +404,27 @@ fn optional_user_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
     auth_service::verify_access_token(&state.config, token)
         .ok()
         .and_then(|claims| Uuid::parse_str(&claims.sub).ok())
+}
+
+fn authenticate_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<auth_service::AccessClaims, ApiError> {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })
+        .ok_or(ApiError::Unauthorized)?;
+
+    let claims = auth_service::verify_access_token(&state.config, token)
+        .map_err(|_| ApiError::Unauthorized)?;
+    if !matches!(claims.account_type, AccountType::Admin) {
+        return Err(ApiError::Forbidden);
+    }
+
+    Ok(claims)
 }
