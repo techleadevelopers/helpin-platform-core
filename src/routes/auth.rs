@@ -2,6 +2,7 @@ use std::time::Duration as StdDuration;
 
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     Json,
 };
 use chrono::{Duration, Utc};
@@ -39,8 +40,14 @@ pub struct RegisterRequest {
     pub ong_type: Option<String>,
     pub cnpj: Option<String>,
     pub phone: Option<String>,
+    pub cep: Option<String>,
+    pub street: Option<String>,
+    pub number: Option<String>,
+    pub complement: Option<String>,
+    pub neighborhood: Option<String>,
     pub city: Option<String>,
     pub state: Option<String>,
+    pub foundation_year: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +92,19 @@ pub struct ActionQueuedResponse {
     pub status: &'static str,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAvatarRequest {
+    #[validate(url)]
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAvatarResponse {
+    pub avatar_url: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OngRegistrationProfile {
@@ -92,8 +112,14 @@ pub struct OngRegistrationProfile {
     pub ong_type: Option<String>,
     pub cnpj: Option<String>,
     pub phone: Option<String>,
+    pub cep: Option<String>,
+    pub street: Option<String>,
+    pub number: Option<String>,
+    pub complement: Option<String>,
+    pub neighborhood: Option<String>,
     pub city: Option<String>,
     pub state: Option<String>,
+    pub foundation_year: Option<i32>,
     pub verification_status: String,
 }
 
@@ -271,6 +297,28 @@ pub async fn delete_account() -> Json<ActionQueuedResponse> {
     Json(ActionQueuedResponse { status: "deleted" })
 }
 
+pub async fn update_avatar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateAvatarRequest>,
+) -> Result<Json<UpdateAvatarResponse>, ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+
+    sqlx::query("UPDATE users SET avatar_url = $1 WHERE id = $2")
+        .bind(&payload.avatar_url)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(UpdateAvatarResponse {
+        avatar_url: payload.avatar_url,
+    }))
+}
+
 #[derive(Debug)]
 struct UserRecord {
     id: Uuid,
@@ -288,8 +336,14 @@ struct OngRecord {
     ong_type: Option<String>,
     cnpj: Option<String>,
     phone: Option<String>,
+    cep: Option<String>,
+    street: Option<String>,
+    number: Option<String>,
+    complement: Option<String>,
+    neighborhood: Option<String>,
     city: Option<String>,
     state: Option<String>,
+    foundation_year: Option<i32>,
     verification_status: String,
 }
 
@@ -347,9 +401,10 @@ async fn insert_user_with_optional_ong(
             r#"
             INSERT INTO ong_profiles (
               id, user_id, legal_name, cnpj, mission, city, state, area_type, contact_phone,
+              cep, street, number, complement, neighborhood, foundation_year,
               verification_status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_MANUAL_REVIEW')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING_MANUAL_REVIEW')
             "#,
         )
         .bind(Uuid::now_v7())
@@ -361,6 +416,12 @@ async fn insert_user_with_optional_ong(
         .bind(payload.state.as_deref())
         .bind(payload.ong_type.as_deref())
         .bind(payload.phone.as_deref())
+        .bind(payload.cep.as_deref())
+        .bind(payload.street.as_deref())
+        .bind(payload.number.as_deref())
+        .bind(payload.complement.as_deref())
+        .bind(payload.neighborhood.as_deref())
+        .bind(payload.foundation_year)
         .execute(&mut *tx)
         .await?;
 
@@ -369,8 +430,14 @@ async fn insert_user_with_optional_ong(
             ong_type: payload.ong_type.clone(),
             cnpj: cnpj.map(str::to_string),
             phone: payload.phone.clone(),
+            cep: payload.cep.clone(),
+            street: payload.street.clone(),
+            number: payload.number.clone(),
+            complement: payload.complement.clone(),
+            neighborhood: payload.neighborhood.clone(),
             city: payload.city.clone(),
             state: payload.state.clone(),
+            foundation_year: payload.foundation_year,
             verification_status: "PENDING_MANUAL_REVIEW".into(),
         })
     } else {
@@ -387,7 +454,8 @@ async fn find_ong_by_user_id(
 ) -> Result<Option<OngRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT legal_name, area_type, cnpj, contact_phone, city, state, verification_status
+        SELECT legal_name, area_type, cnpj, contact_phone, cep, street, number, complement,
+               neighborhood, city, state, foundation_year, verification_status
         FROM ong_profiles
         WHERE user_id = $1
         ORDER BY created_at DESC
@@ -403,8 +471,14 @@ async fn find_ong_by_user_id(
         ong_type: row.get("area_type"),
         cnpj: row.get("cnpj"),
         phone: row.get("contact_phone"),
+        cep: row.get("cep"),
+        street: row.get("street"),
+        number: row.get("number"),
+        complement: row.get("complement"),
+        neighborhood: row.get("neighborhood"),
         city: row.get("city"),
         state: row.get("state"),
+        foundation_year: row.get("foundation_year"),
         verification_status: row.get("verification_status"),
     }))
 }
@@ -480,6 +554,21 @@ async fn queue_password_reset(state: &AppState, email: &str) {
 
 fn new_action_token() -> String {
     format!("{}.{}", Uuid::now_v7(), Uuid::now_v7())
+}
+
+fn authenticate_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<auth_service::AccessClaims, ApiError> {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let token = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
 }
 
 async fn issue_auth_response(
@@ -592,8 +681,14 @@ fn auth_response(
             ong_type: record.ong_type,
             cnpj: record.cnpj,
             phone: record.phone,
+            cep: record.cep,
+            street: record.street,
+            number: record.number,
+            complement: record.complement,
+            neighborhood: record.neighborhood,
             city: record.city,
             state: record.state,
+            foundation_year: record.foundation_year,
             verification_status: record.verification_status,
         }),
         access_token,
@@ -625,8 +720,30 @@ fn validate_ong_payload(
             "city is required for ONG accounts".into(),
         ));
     }
+    if payload.cep.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(ApiError::Validation(
+            "cep is required for ONG accounts".into(),
+        ));
+    }
+    if payload.street.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(ApiError::Validation(
+            "street is required for ONG accounts".into(),
+        ));
+    }
+    if payload.number.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(ApiError::Validation(
+            "number is required for ONG accounts".into(),
+        ));
+    }
     if payload.state.as_deref().unwrap_or("").trim().len() != 2 {
         return Err(ApiError::Validation("state must be a 2-letter UF".into()));
+    }
+    if let Some(year) = payload.foundation_year {
+        let current_year = Utc::now().date_naive().format("%Y").to_string();
+        let current_year = current_year.parse::<i32>().unwrap_or(2100);
+        if year < 1900 || year > current_year {
+            return Err(ApiError::Validation("foundationYear is invalid".into()));
+        }
     }
     if let Some(cnpj) = payload
         .cnpj
@@ -667,8 +784,14 @@ fn fallback_ong_record(payload: &RegisterRequest, account_type: &AccountType) ->
         ong_type: payload.ong_type.clone(),
         cnpj,
         phone: payload.phone.clone(),
+        cep: payload.cep.clone(),
+        street: payload.street.clone(),
+        number: payload.number.clone(),
+        complement: payload.complement.clone(),
+        neighborhood: payload.neighborhood.clone(),
         city: payload.city.clone(),
         state: payload.state.clone(),
+        foundation_year: payload.foundation_year,
         verification_status: "PENDING_MANUAL_REVIEW".into(),
     })
 }
