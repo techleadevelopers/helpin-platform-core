@@ -1,0 +1,5 @@
+GET http://127.0.0.1:8080/healthz
+GET http://127.0.0.1:8080/readyz
+GET http://127.0.0.1:8080/v1/feed?lat=-23.5505&lng=-46.6333&radius_km=25&limit=30
+GET http://127.0.0.1:8080/v1/geo/nearby?lat=-23.5505&lng=-46.6333&radius_km=25&limit=30
+GET http://127.0.0.1:8080/v1/search?q=Campinas&limit=20
