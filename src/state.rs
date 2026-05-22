@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::broadcast;
 
-use crate::{
-    config::Config,
-    services::{email::EmailService, notifications::NotificationEngine},
-};
+use crate::{config::Config, services::email::EmailService};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,7 +17,6 @@ pub struct AppState {
     pub chat_tx: broadcast::Sender<ChatEvent>,
     pub rescue_tx: broadcast::Sender<RescueEvent>,
     pub email: EmailService,
-    pub notifications: NotificationEngine,
     pub rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
@@ -43,7 +39,6 @@ impl AppState {
             chat_tx,
             rescue_tx,
             email,
-            notifications: NotificationEngine::default(),
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -51,6 +46,9 @@ impl AppState {
 
 async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
     let statements = [
+        r#"
+        CREATE EXTENSION IF NOT EXISTS postgis;
+        "#,
         r#"
         DO $$
         BEGIN
@@ -80,6 +78,11 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "ALTER TABLE posts ALTER COLUMN moderation_status SET DEFAULT 'approved';",
         "UPDATE posts SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100);",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo geography(Point, 4326);",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS idempotency_key text;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx ON posts (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
+        "UPDATE posts SET geo = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography WHERE geo IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL;",
+        "CREATE INDEX IF NOT EXISTS posts_geo_gist_idx ON posts USING gist (geo);",
         r#"
         CREATE TABLE IF NOT EXISTS media_upload_intents (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -152,6 +155,17 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS notification_events_user_created_idx ON notification_events (user_id, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS notification_events_dedupe_idx ON notification_events (dedupe_key, user_id);",
         r#"
+        CREATE TABLE IF NOT EXISTS user_ong_follows (
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          ong_id uuid NOT NULL REFERENCES ong_profiles(id) ON DELETE CASCADE,
+          active boolean NOT NULL DEFAULT true,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (user_id, ong_id)
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS user_ong_follows_ong_idx ON user_ong_follows (ong_id, active);",
+        r#"
         CREATE TABLE IF NOT EXISTS post_media (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
           post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -174,6 +188,38 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "UPDATE post_media SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
         "CREATE INDEX IF NOT EXISTS post_media_post_idx ON post_media (post_id, sort_order);",
         "CREATE INDEX IF NOT EXISTS post_media_moderation_idx ON post_media (moderation_status, created_at);",
+        r#"
+        CREATE TABLE IF NOT EXISTS post_likes (
+          post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (post_id, user_id)
+        );
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS post_comments (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          body text NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
+          moderation_status text NOT NULL DEFAULT 'visible_monitored',
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS post_comments_post_created_idx ON post_comments (post_id, created_at DESC);",
+        r#"
+        CREATE TABLE IF NOT EXISTS post_reports (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+          reporter_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          reason text NOT NULL,
+          details text,
+          severity text NOT NULL DEFAULT 'normal',
+          status text NOT NULL DEFAULT 'queued_review',
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS post_reports_status_created_idx ON post_reports (status, created_at);",
         r#"
         CREATE TABLE IF NOT EXISTS rescue_sessions (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -227,6 +273,22 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         );
         "#,
         "CREATE INDEX IF NOT EXISTS donation_ledger_entries_donation_idx ON donation_ledger_entries (donation_id, created_at);",
+        r#"
+        CREATE TABLE IF NOT EXISTS moderation_jobs (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          subject_type text NOT NULL,
+          subject_id text NOT NULL,
+          image_url text,
+          status text NOT NULL DEFAULT 'queued',
+          score smallint CHECK (score IS NULL OR score BETWEEN 0 AND 100),
+          labels text[] NOT NULL DEFAULT '{}',
+          provider text,
+          error text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS moderation_jobs_status_created_idx ON moderation_jobs (status, created_at);",
     ];
 
     for statement in statements {
