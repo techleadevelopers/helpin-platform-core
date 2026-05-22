@@ -68,7 +68,9 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS likes_count integer NOT NULL DEFAULT 0 CHECK (likes_count >= 0);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS comments_count integer NOT NULL DEFAULT 0 CHECK (comments_count >= 0);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS shares_count integer NOT NULL DEFAULT 0 CHECK (shares_count >= 0);",
-        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderation_status moderation_status NOT NULL DEFAULT 'queued';",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderation_status moderation_status NOT NULL DEFAULT 'approved';",
+        "ALTER TABLE posts ALTER COLUMN moderation_status SET DEFAULT 'approved';",
+        "UPDATE posts SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100);",
         r#"
         CREATE TABLE IF NOT EXISTS media_upload_intents (
@@ -103,11 +105,13 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
           size_bytes bigint CHECK (size_bytes IS NULL OR size_bytes > 0),
           checksum_sha256 text,
           sort_order smallint NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
-          moderation_status moderation_status NOT NULL DEFAULT 'queued',
+          moderation_status moderation_status NOT NULL DEFAULT 'approved',
           moderation_labels text[] NOT NULL DEFAULT '{}',
           created_at timestamptz NOT NULL DEFAULT now()
         );
         "#,
+        "ALTER TABLE post_media ALTER COLUMN moderation_status SET DEFAULT 'approved';",
+        "UPDATE post_media SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
         "CREATE INDEX IF NOT EXISTS post_media_post_idx ON post_media (post_id, sort_order);",
         "CREATE INDEX IF NOT EXISTS post_media_moderation_idx ON post_media (moderation_status, created_at);",
     ];
