@@ -113,7 +113,7 @@ async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
             u.account_type::text AS author_type
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
-        WHERE p.moderation_status IN ('queued', 'approved', 'needs_review')
+        WHERE p.moderation_status = 'approved'
         ORDER BY p.created_at DESC
         LIMIT 100
         "#,
