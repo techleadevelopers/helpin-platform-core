@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::broadcast;
 
-use crate::{config::Config, services::email::EmailService};
+use crate::{
+    config::Config,
+    services::{email::EmailService, event_bus::EventBus},
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,6 +20,8 @@ pub struct AppState {
     pub chat_tx: broadcast::Sender<ChatEvent>,
     pub rescue_tx: broadcast::Sender<RescueEvent>,
     pub email: EmailService,
+    pub event_bus: EventBus,
+    pub redis: Option<redis::Client>,
     pub rate_limiter: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
 }
 
@@ -32,6 +37,14 @@ impl AppState {
         let (chat_tx, _) = broadcast::channel(1024);
         let (rescue_tx, _) = broadcast::channel(4096);
         let email = EmailService::new(config.clone());
+        let event_bus = EventBus::connect(&config).await?;
+        event_bus.spawn_bridge(chat_tx.clone(), rescue_tx.clone());
+        let redis = if config.app_env == "test" {
+            None
+        } else {
+            Some(redis::Client::open(config.redis_url.as_str())?)
+        };
+        crate::services::push_worker::spawn(config.clone(), db.clone());
 
         Ok(Self {
             config,
@@ -39,6 +52,8 @@ impl AppState {
             chat_tx,
             rescue_tx,
             email,
+            event_bus,
+            redis,
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -154,6 +169,23 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "#,
         "CREATE INDEX IF NOT EXISTS notification_events_user_created_idx ON notification_events (user_id, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS notification_events_dedupe_idx ON notification_events (dedupe_key, user_id);",
+        r#"
+        CREATE TABLE IF NOT EXISTS push_delivery_jobs (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          notification_event_id uuid REFERENCES notification_events(id) ON DELETE CASCADE,
+          user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+          push_token text NOT NULL,
+          platform text NOT NULL,
+          payload jsonb NOT NULL,
+          status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed', 'dead_letter')),
+          attempts integer NOT NULL DEFAULT 0,
+          next_attempt_at timestamptz NOT NULL DEFAULT now(),
+          last_error text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS push_delivery_jobs_status_next_idx ON push_delivery_jobs (status, next_attempt_at);",
         r#"
         CREATE TABLE IF NOT EXISTS user_ong_follows (
           user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -273,6 +305,35 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         );
         "#,
         "CREATE INDEX IF NOT EXISTS donation_ledger_entries_donation_idx ON donation_ledger_entries (donation_id, created_at);",
+        r#"
+        CREATE TABLE IF NOT EXISTS payment_webhook_events (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider text NOT NULL,
+          provider_event_id text NOT NULL,
+          event_type text NOT NULL,
+          donation_id uuid REFERENCES donations(id) ON DELETE SET NULL,
+          payload jsonb NOT NULL,
+          processed_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (provider, provider_event_id)
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS payment_webhook_events_donation_idx ON payment_webhook_events (donation_id, created_at DESC);",
+        r#"
+        CREATE TABLE IF NOT EXISTS ong_kyb_documents (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          ong_id uuid NOT NULL REFERENCES ong_profiles(id) ON DELETE CASCADE,
+          document_type text NOT NULL,
+          object_key text NOT NULL,
+          public_url text NOT NULL,
+          status text NOT NULL DEFAULT 'pending_review',
+          reviewer_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+          rejection_reason text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          reviewed_at timestamptz
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS ong_kyb_documents_ong_status_idx ON ong_kyb_documents (ong_id, status, created_at DESC);",
         r#"
         CREATE TABLE IF NOT EXISTS moderation_jobs (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
