@@ -141,6 +141,8 @@ mod tests {
         Config {
             bind_addr: "127.0.0.1:0".into(),
             database_url: "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into(),
+            database_max_connections: 5,
+            database_min_connections: 0,
             redis_url: "redis://localhost:6379".into(),
             nats_url: "nats://localhost:4222".into(),
             ai_worker_url: "http://127.0.0.1:8090".into(),
