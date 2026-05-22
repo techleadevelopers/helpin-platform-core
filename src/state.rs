@@ -56,6 +56,12 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         $$;
         "#,
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url text;",
+        "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS cep text;",
+        "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS street text;",
+        "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS number text;",
+        "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS complement text;",
+        "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS neighborhood text;",
+        "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS foundation_year integer;",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS urgent boolean NOT NULL DEFAULT false;",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS text_only boolean NOT NULL DEFAULT false;",
