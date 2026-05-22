@@ -1,9 +1,15 @@
-use axum::{extract::Query, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{seed_posts, Post},
+    domain::Post,
+    error::ApiError,
+    routes::feed::{load_db_posts, FeedQuery},
     services::geo::haversine_km,
+    state::AppState,
 };
 
 #[derive(Deserialize)]
@@ -20,11 +26,32 @@ pub struct NearbyCase {
     pub distance_km: f64,
 }
 
-pub async fn nearby_cases(Query(query): Query<NearbyQuery>) -> Json<Vec<NearbyCase>> {
-    let origin = (query.lat.unwrap_or(-23.5505), query.lng.unwrap_or(-46.6333));
+pub async fn nearby_cases(
+    State(state): State<AppState>,
+    Query(query): Query<NearbyQuery>,
+) -> Result<Json<Vec<NearbyCase>>, ApiError> {
+    let origin = query
+        .lat
+        .zip(query.lng)
+        .ok_or_else(|| ApiError::Validation("lat and lng are required".into()))?;
     let radius = query.radius_km.unwrap_or(30.0).clamp(1.0, 500.0);
 
-    let cases = seed_posts()
+    let posts = load_db_posts(
+        &state,
+        &FeedQuery {
+            post_type: None,
+            author_type: None,
+            urgent: None,
+            lat: Some(origin.0),
+            lng: Some(origin.1),
+            radius_km: Some(radius),
+            limit: Some(100),
+            before: None,
+        },
+    )
+    .await?;
+
+    let cases = posts
         .into_iter()
         .filter_map(|post| {
             let distance = haversine_km(origin.0, origin.1, post.latitude, post.longitude);
@@ -35,5 +62,5 @@ pub async fn nearby_cases(Query(query): Query<NearbyQuery>) -> Json<Vec<NearbyCa
         })
         .collect();
 
-    Json(cases)
+    Ok(Json(cases))
 }
