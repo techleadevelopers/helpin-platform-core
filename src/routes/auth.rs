@@ -76,6 +76,13 @@ pub struct AuthResponse {
     pub token_type: &'static str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentUserResponse {
+    pub user: UserProfile,
+    pub ong_profile: Option<OngRegistrationProfile>,
+}
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct PasswordResetRequest {
     #[validate(email)]
@@ -293,6 +300,24 @@ pub async fn verify_email(
     }
 }
 
+pub async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CurrentUserResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let record = find_user_by_id(&state, user_id)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    let ong_record = if matches!(record.account_type, AccountType::Ong) {
+        find_ong_by_user_id(&state, record.id).await?
+    } else {
+        None
+    };
+
+    Ok(Json(current_user_response(record, ong_record)))
+}
+
 pub async fn delete_account() -> Json<ActionQueuedResponse> {
     Json(ActionQueuedResponse { status: "deleted" })
 }
@@ -359,6 +384,24 @@ async fn find_user_by_email(
         "#,
     )
     .bind(email)
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(row.map(row_to_user_record))
+}
+
+async fn find_user_by_id(
+    state: &AppState,
+    id: Uuid,
+) -> Result<Option<UserRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
     .fetch_optional(&state.db)
     .await?;
 
@@ -694,6 +737,47 @@ fn auth_response(
         access_token,
         refresh_token,
         token_type: "Bearer",
+    }
+}
+
+fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> CurrentUserResponse {
+    let user_verified = if matches!(&record.account_type, AccountType::Ong) {
+        ong_record
+            .as_ref()
+            .map(|record| record.verification_status == "APPROVED")
+            .unwrap_or(false)
+    } else {
+        record.verified
+    };
+
+    CurrentUserResponse {
+        user: UserProfile {
+            id: record.id.to_string(),
+            name: record.name,
+            email: record.email,
+            avatar: record.avatar,
+            bio: "Apaixonada por animais".into(),
+            account_type: record.account_type,
+            verified: user_verified,
+            posts_count: 0,
+            helped_count: 0,
+            adoptions_count: 0,
+        },
+        ong_profile: ong_record.map(|record| OngRegistrationProfile {
+            legal_name: record.legal_name,
+            ong_type: record.ong_type,
+            cnpj: record.cnpj,
+            phone: record.phone,
+            cep: record.cep,
+            street: record.street,
+            number: record.number,
+            complement: record.complement,
+            neighborhood: record.neighborhood,
+            city: record.city,
+            state: record.state,
+            foundation_year: record.foundation_year,
+            verification_status: record.verification_status,
+        }),
     }
 }
 
