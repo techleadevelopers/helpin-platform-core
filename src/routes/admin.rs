@@ -152,7 +152,12 @@ pub async fn update_user(
 ) -> Result<Json<AdminUserProfile>, ApiError> {
     authenticate_admin(&state, &headers)?;
 
-    if let Some(name) = payload.name.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(name) = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         sqlx::query("UPDATE users SET name = $1 WHERE id = $2")
             .bind(name)
             .bind(id)
@@ -189,7 +194,6 @@ pub async fn delete_user(
 
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
-
 
 pub async fn pending_ongs(
     State(state): State<AppState>,
