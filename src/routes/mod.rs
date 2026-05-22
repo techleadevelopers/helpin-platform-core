@@ -42,6 +42,8 @@ pub fn router(state: AppState) -> Router {
             "/v1/admin/ongs/pending-verification",
             get(admin::pending_ongs),
         )
+        .route("/v1/admin/users", get(admin::list_users))
+        .route("/v1/admin/users/:id", get(admin::get_user))
         .route(
             "/v1/admin/ongs/:id/verification-status",
             patch(admin::update_ong_verification_status),
