@@ -124,7 +124,8 @@ impl Config {
         }
 
         anyhow::ensure!(
-            self.jwt_secret != "dev-only-change-me-before-production" && self.jwt_secret.len() >= 32,
+            self.jwt_secret != "dev-only-change-me-before-production"
+                && self.jwt_secret.len() >= 32,
             "JWT_SECRET must be strong outside development"
         );
         anyhow::ensure!(
