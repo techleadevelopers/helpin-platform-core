@@ -9,9 +9,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    domain::seed_posts,
     error::ApiError,
-    routes::auth::authenticate_request,
+    routes::{auth::authenticate_request, posts::load_post_by_id},
     services::notifications::{
         dispatch_persistent_rescue_alert, upsert_persistent_subscription, PushPlatform,
         PushSubscription, RescueAlert,
@@ -148,7 +147,6 @@ pub async fn register_push_token(
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     let subscribers = upsert_persistent_subscription(&state.db, user_id, &subscription).await?;
-    state.notifications.upsert_subscription(subscription);
 
     Ok((
         StatusCode::ACCEPTED,
@@ -165,9 +163,9 @@ pub async fn preview_rescue_alert(
     Path(post_id): Path<String>,
 ) -> Result<Json<AlertDispatchResponse>, ApiError> {
     authenticate_request(&state, &headers)?;
-    let post = seed_posts()
-        .into_iter()
-        .find(|post| post.id == post_id)
+    let post_id = Uuid::parse_str(&post_id).map_err(|_| ApiError::NotFound)?;
+    let post = load_post_by_id(&state, post_id)
+        .await?
         .ok_or(ApiError::NotFound)?;
     let alert = dispatch_persistent_rescue_alert(&state.db, &post, 5.0).await?;
     Ok(Json(AlertDispatchResponse { alert }))
