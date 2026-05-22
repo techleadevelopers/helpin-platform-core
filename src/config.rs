@@ -4,6 +4,7 @@ use anyhow::Context;
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub app_env: String,
     pub bind_addr: String,
     pub database_url: String,
     pub database_max_connections: u32,
@@ -28,11 +29,15 @@ pub struct Config {
     pub smtp_from_name: String,
     pub access_token_ttl_minutes: i64,
     pub refresh_token_ttl_days: i64,
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        Ok(Self {
+        let config = Self {
+            app_env: env::var("APP_ENV")
+                .or_else(|_| env::var("RUST_ENV"))
+                .unwrap_or_else(|_| "development".to_string()),
             bind_addr: env::var("PORT")
                 .map(|port| format!("0.0.0.0:{port}"))
                 .or_else(|_| env::var("BIND_ADDR"))
@@ -92,7 +97,45 @@ impl Config {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(30),
-        })
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn is_development(&self) -> bool {
+        matches!(self.app_env.as_str(), "development" | "dev" | "test")
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.is_development() {
+            return Ok(());
+        }
+
+        anyhow::ensure!(
+            self.jwt_secret != "dev-only-change-me-before-production" && self.jwt_secret.len() >= 32,
+            "JWT_SECRET must be strong outside development"
+        );
+        anyhow::ensure!(
+            self.cloudinary_api_key.is_some() && self.cloudinary_api_secret.is_some(),
+            "Cloudinary credentials are required outside development"
+        );
+        anyhow::ensure!(
+            !self.cors_allowed_origins.is_empty(),
+            "CORS_ALLOWED_ORIGINS is required outside development"
+        );
+        Ok(())
     }
 }
 
