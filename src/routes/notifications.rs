@@ -100,7 +100,9 @@ pub async fn list_notifications(
                 id: row.get::<Uuid, _>("id").to_string(),
                 title: row.get("title"),
                 body: row.get("body"),
-                read: row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("read_at").is_some(),
+                read: row
+                    .get::<Option<chrono::DateTime<chrono::Utc>>, _>("read_at")
+                    .is_some(),
                 kind: row.get("kind"),
                 post_id: row.get("post_id"),
                 image_url: row.get("image_url"),
@@ -108,7 +110,9 @@ pub async fn list_notifications(
                 critical: row.get("critical"),
                 deeplink: row.get("deeplink"),
                 dedupe_key: row.get("dedupe_key"),
-                ttl_seconds: row.get::<Option<i32>, _>("ttl_seconds").map(|value| value as u32),
+                ttl_seconds: row
+                    .get::<Option<i32>, _>("ttl_seconds")
+                    .map(|value| value as u32),
                 category: row.get("category"),
                 payload: row.get("payload"),
                 created_at: row
