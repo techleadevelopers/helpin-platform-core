@@ -30,6 +30,8 @@ pub struct Config {
     pub access_token_ttl_minutes: i64,
     pub refresh_token_ttl_days: i64,
     pub cors_allowed_origins: Vec<String>,
+    pub postgis_enabled: bool,
+    pub payments_enabled: bool,
     pub payment_provider: String,
     pub payment_webhook_secret: Option<String>,
     pub sentry_dsn: Option<String>,
@@ -113,8 +115,9 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
-            payment_provider: env::var("PAYMENT_PROVIDER")
-                .unwrap_or_else(|_| "manual_psp_required".to_string()),
+            postgis_enabled: env_bool("POSTGIS_ENABLED").unwrap_or(false),
+            payments_enabled: env_bool("PAYMENTS_ENABLED").unwrap_or(false),
+            payment_provider: env::var("PAYMENT_PROVIDER").unwrap_or_else(|_| "disabled".to_string()),
             payment_webhook_secret: env::var("PAYMENT_WEBHOOK_SECRET").ok(),
             sentry_dsn: env::var("SENTRY_DSN").ok(),
             push_worker_enabled: env::var("PUSH_WORKER_ENABLED")
@@ -158,16 +161,25 @@ impl Config {
             !self.nats_url.trim().is_empty(),
             "NATS_URL is required outside development"
         );
-        anyhow::ensure!(
-            self.payment_provider != "manual_psp_required"
-                && self
-                    .payment_webhook_secret
-                    .as_deref()
-                    .is_some_and(|value| value.len() >= 24),
-            "PAYMENT_PROVIDER and a strong PAYMENT_WEBHOOK_SECRET are required outside development"
-        );
+        if self.payments_enabled {
+            anyhow::ensure!(
+                self.payment_provider != "disabled"
+                    && self.payment_provider != "manual_psp_required"
+                    && self
+                        .payment_webhook_secret
+                        .as_deref()
+                        .is_some_and(|value| value.len() >= 24),
+                "PAYMENT_PROVIDER and a strong PAYMENT_WEBHOOK_SECRET are required when PAYMENTS_ENABLED=true"
+            );
+        }
         Ok(())
     }
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    env::var(key)
+        .ok()
+        .map(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
 }
 
 fn cloud_name_from_url(value: &str) -> Option<String> {
