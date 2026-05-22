@@ -302,7 +302,7 @@ pub async fn create_post(
         }
     }
 
-    let post_id: Uuid = sqlx::query_scalar(
+    let insert_sql = if state.config.postgis_enabled {
         r#"
         INSERT INTO posts (
             author_id, post_type, animal_type, name, breed, age, description,
@@ -316,8 +316,23 @@ pub async fn create_post(
             $17
         )
         RETURNING id
-        "#,
-    )
+        "#
+    } else {
+        r#"
+        INSERT INTO posts (
+            author_id, post_type, animal_type, name, breed, age, description,
+            latitude, longitude, location_label, neighborhood, contact, tags,
+            urgent, text_only, moderation_status, fraud_risk, idempotency_key
+        )
+        VALUES (
+            $1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, 'approved', $16, $17
+        )
+        RETURNING id
+        "#
+    };
+
+    let post_id: Uuid = sqlx::query_scalar(insert_sql)
     .bind(author_id)
     .bind(post_type_as_str(&post_type))
     .bind(animal_type_as_str(&payload.animal_type))
