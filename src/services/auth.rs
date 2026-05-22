@@ -105,6 +105,7 @@ mod tests {
     #[test]
     fn access_token_round_trips_claims() {
         let config = Config {
+            app_env: "test".into(),
             bind_addr: "127.0.0.1:0".into(),
             database_url: "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into(),
             database_max_connections: 5,
@@ -129,6 +130,7 @@ mod tests {
             smtp_from_name: "ZooHelp".into(),
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
+            cors_allowed_origins: Vec::new(),
         };
 
         let token =
