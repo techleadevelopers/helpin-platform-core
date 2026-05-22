@@ -19,6 +19,13 @@ pub struct VerificationStatusRequest {
     pub rejection_reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAdminUserRequest {
+    pub name: Option<String>,
+    pub phone: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminOngProfile {
@@ -136,6 +143,53 @@ pub async fn get_user(
 
     Ok(Json(row_to_admin_user(row)))
 }
+
+pub async fn update_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateAdminUserRequest>,
+) -> Result<Json<AdminUserProfile>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+
+    if let Some(name) = payload.name.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        sqlx::query("UPDATE users SET name = $1 WHERE id = $2")
+            .bind(name)
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+    }
+
+    if let Some(phone) = payload.phone.as_deref() {
+        sqlx::query("UPDATE ong_profiles SET contact_phone = $1 WHERE user_id = $2")
+            .bind(phone.trim())
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+    }
+
+    get_user(State(state), headers, Path(id)).await
+}
+
+pub async fn delete_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+
+    let result = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
 
 pub async fn pending_ongs(
     State(state): State<AppState>,
