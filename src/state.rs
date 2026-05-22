@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,9 @@ pub struct AppState {
 impl AppState {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let db = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(config.database_max_connections)
+            .min_connections(config.database_min_connections)
+            .acquire_timeout(Duration::from_secs(5))
             .connect_lazy(&config.database_url)?;
         ensure_runtime_schema(&db).await?;
 
