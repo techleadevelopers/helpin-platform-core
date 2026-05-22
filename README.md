@@ -96,6 +96,21 @@ The codebase is organized around practical production constraints:
    |-- analytics and admin automation
 ```
 
+## Visual Architecture
+
+Versioned architecture diagrams live in [`docs/architecture/README.md`](docs/architecture/README.md).
+
+Included diagrams:
+
+- C4 context
+- C4 container
+- rescue lifecycle
+- rescue creation sequence
+- notification flow
+- event flow
+- chat realtime flow
+- benchmark evidence flow
+
 ## Runtime Pipeline
 
 The active rescue publication flow is intentionally linear.
@@ -301,6 +316,29 @@ This validates the TypeScript contract across:
 ## Performance and Scaling Notes
 
 The architecture is designed for low-latency rescue coordination, but performance claims should be backed by measured output.
+
+Executable benchmark assets live in [`benchmarks/`](benchmarks/).
+
+Quick commands:
+
+```powershell
+k6 run .\benchmarks\k6\http-rescue-feed.js
+k6 run .\benchmarks\k6\websocket-chat.js
+locust -f .\benchmarks\locust\locustfile.py --host http://127.0.0.1:8080
+vegeta attack -duration=60s -rate=100 -targets=.\benchmarks\vegeta\feed.targets | vegeta report
+```
+
+Candidate WebSocket scale run:
+
+```powershell
+$env:ROOM_ID = "<chat-room-id>"
+$env:ACCESS_TOKEN = "<jwt>"
+$env:K6_WS_VUS = "10000"
+$env:K6_DURATION = "10m"
+k6 run .\benchmarks\k6\websocket-chat.js
+```
+
+Benchmark reports should be attached under [`benchmarks/reports/`](benchmarks/reports/) before using any public throughput claim.
 
 Useful evidence for production hardening:
 
@@ -533,7 +571,7 @@ Known hardening gaps before real public scale:
 - deliver push notifications through FCM/APNs workers
 - enforce production rate limits and abuse controls
 - complete durable moderation and report review flows
-- load test with PostgreSQL, Redis, queue, upload, WebSocket, and push delivery enabled
+- publish measured benchmark reports for PostgreSQL, Redis, queue, upload, WebSocket, and push delivery paths
 - add migration-backed user/session/post/chat persistence where still mocked
 - add production observability dashboards and alerting
 
