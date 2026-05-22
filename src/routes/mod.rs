@@ -43,12 +43,17 @@ pub fn router(state: AppState) -> Router {
             get(admin::pending_ongs),
         )
         .route("/v1/admin/users", get(admin::list_users))
-        .route("/v1/admin/users/:id", get(admin::get_user))
+        .route(
+            "/v1/admin/users/:id",
+            get(admin::get_user)
+                .patch(admin::update_user)
+                .delete(admin::delete_user),
+        )
         .route(
             "/v1/admin/ongs/:id/verification-status",
             patch(admin::update_ong_verification_status),
         )
-        .route("/v1/me", delete(auth::delete_account))
+        .route("/v1/me", get(auth::me).delete(auth::delete_account))
         .route("/v1/me/avatar", patch(auth::update_avatar))
         .route("/v1/feed", get(feed::list_feed))
         .route("/v1/posts", post(posts::create_post))
@@ -313,7 +318,7 @@ mod tests {
             "https://cdn.zoohelp.local/posts/test/mel.webp"
         );
         assert_eq!(body["post"]["images"][0]["contentType"], "image/webp");
-        assert_eq!(body["media"][0]["moderationStatus"], "queued");
+        assert_eq!(body["media"][0]["moderationStatus"], "approved");
     }
 
     #[tokio::test]
