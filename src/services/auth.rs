@@ -131,6 +131,11 @@ mod tests {
             access_token_ttl_minutes: 15,
             refresh_token_ttl_days: 30,
             cors_allowed_origins: Vec::new(),
+            payment_provider: "test".into(),
+            payment_webhook_secret: Some("test-webhook-secret-123456".into()),
+            sentry_dsn: None,
+            push_worker_enabled: false,
+            push_provider: "expo".into(),
         };
 
         let token =
