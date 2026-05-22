@@ -10,10 +10,7 @@ use sha1::{Digest, Sha1};
 use validator::Validate;
 
 use crate::{
-    error::ApiError,
-    routes::auth::authenticate_request,
-    services::rate_limit,
-    state::AppState,
+    error::ApiError, routes::auth::authenticate_request, services::rate_limit, state::AppState,
 };
 
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
@@ -141,9 +138,8 @@ pub async fn create_upload_intent(
     let signature = format!("{:x}", Sha1::digest(signature_payload.as_bytes()));
 
     let upload_url = format!("https://api.cloudinary.com/v1_1/{cloud_name}/{media_kind}/upload");
-    let public_url = format!(
-        "https://res.cloudinary.com/{cloud_name}/{media_kind}/upload/{object_key}"
-    );
+    let public_url =
+        format!("https://res.cloudinary.com/{cloud_name}/{media_kind}/upload/{object_key}");
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(i64::from(UPLOAD_TTL_SECONDS));
 
     sqlx::query(
