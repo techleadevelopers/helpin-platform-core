@@ -72,7 +72,8 @@ pub async fn create_upload_intent(
         &format!("media:upload-intent:{user_id}"),
         30,
         StdDuration::from_secs(60),
-    )?;
+    )
+    .await?;
 
     let media_kind = media_kind(&payload.content_type).ok_or_else(|| {
         ApiError::Validation(format!(
