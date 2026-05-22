@@ -1,10 +1,17 @@
+#[cfg(test)]
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 static AUTHORS: LazyLock<Vec<Author>> = LazyLock::new(build_authors);
+#[cfg(test)]
+#[allow(dead_code)]
 static ONGS: LazyLock<Vec<Ong>> = LazyLock::new(build_ongs);
+#[cfg(test)]
 static POSTS: LazyLock<Vec<Post>> = LazyLock::new(build_posts);
+#[cfg(test)]
+#[allow(dead_code)]
 static CONVERSATIONS: LazyLock<Vec<ChatConversation>> = LazyLock::new(build_conversations);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -129,22 +136,29 @@ pub struct ChatMessage {
     pub created_at: String,
 }
 
+#[cfg(test)]
 pub fn seed_authors() -> Vec<Author> {
     AUTHORS.clone()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn seed_ongs() -> Vec<Ong> {
     ONGS.clone()
 }
 
+#[cfg(test)]
 pub fn seed_posts() -> Vec<Post> {
     POSTS.clone()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn seed_conversations() -> Vec<ChatConversation> {
     CONVERSATIONS.clone()
 }
 
+#[cfg(test)]
 fn build_authors() -> Vec<Author> {
     vec![
         author("u1", "Instituto Amigos dos Animais", true, AccountType::Ong),
@@ -156,6 +170,8 @@ fn build_authors() -> Vec<Author> {
     ]
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn build_ongs() -> Vec<Ong> {
     vec![
         ong(
@@ -245,6 +261,7 @@ fn build_ongs() -> Vec<Ong> {
     ]
 }
 
+#[cfg(test)]
 fn build_posts() -> Vec<Post> {
     let authors = seed_authors();
     vec![
@@ -258,6 +275,8 @@ fn build_posts() -> Vec<Post> {
     ]
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn build_conversations() -> Vec<ChatConversation> {
     let authors = seed_authors();
     vec![
@@ -291,6 +310,8 @@ fn build_conversations() -> Vec<ChatConversation> {
     ]
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn seed_messages(room_id: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
@@ -308,6 +329,7 @@ pub fn seed_messages(room_id: &str) -> Vec<ChatMessage> {
     ]
 }
 
+#[cfg(test)]
 fn author(id: &str, name: &str, verified: bool, account_type: AccountType) -> Author {
     Author {
         id: id.into(),
@@ -318,6 +340,8 @@ fn author(id: &str, name: &str, verified: bool, account_type: AccountType) -> Au
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn ong(
     id: &str,
     name: &str,
@@ -355,6 +379,7 @@ fn ong(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn post(
     id: &str,
     post_type: PostType,
@@ -402,6 +427,8 @@ fn post(
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn conversation(
     id: &str,
     post_id: &str,
