@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::HeaderMap,
     Json,
 };
 use chrono::{DateTime, Datelike, Utc};
@@ -7,11 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{
-    domain::{seed_ongs, Ong},
-    error::ApiError,
-    state::AppState,
-};
+use crate::{domain::Ong, error::ApiError, routes::auth::authenticate_request, state::AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct OngQuery {
@@ -30,44 +27,63 @@ pub struct FollowOngResponse {
 pub async fn list_ongs(
     State(state): State<AppState>,
     Query(query): Query<OngQuery>,
-) -> Json<Vec<Ong>> {
-    let db_ongs = load_db_ongs(&state).await.unwrap_or_else(|error| {
-        tracing::warn!(
-            ?error,
-            "database ONG list unavailable; using seed ONGs only"
-        );
-        Vec::new()
-    });
-
-    Json(filter_ongs(query, db_ongs))
+) -> Result<Json<Vec<Ong>>, ApiError> {
+    Ok(Json(filter_ongs(query, load_db_ongs(&state).await?)))
 }
 
 pub async fn get_ong(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Ong>, ApiError> {
-    if let Ok(uuid) = Uuid::parse_str(&id) {
-        if let Some(ong) = load_db_ong(&state, uuid).await? {
-            return Ok(Json(ong));
-        }
-    }
-
-    seed_ongs()
-        .into_iter()
-        .find(|ong| ong.id == id && ong.verified)
+    let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    load_db_ong(&state, uuid)
+        .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
 }
 
-pub async fn follow_ong(Path(id): Path<String>) -> Result<Json<FollowOngResponse>, ApiError> {
-    if seed_ongs().iter().any(|ong| ong.id == id) || Uuid::parse_str(&id).is_ok() {
-        return Ok(Json(FollowOngResponse {
-            ong_id: id,
-            following: true,
-        }));
+pub async fn follow_ong(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<FollowOngResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let ong_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+
+    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM ong_profiles WHERE id = $1")
+        .bind(ong_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound);
     }
 
-    Err(ApiError::NotFound)
+    sqlx::query(
+        r#"
+        INSERT INTO user_ong_follows (user_id, ong_id)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id, ong_id)
+        DO UPDATE SET active = NOT user_ong_follows.active, updated_at = now()
+        "#,
+    )
+    .bind(user_id)
+    .bind(ong_id)
+    .execute(&state.db)
+    .await?;
+
+    let following: bool = sqlx::query_scalar(
+        "SELECT active FROM user_ong_follows WHERE user_id = $1 AND ong_id = $2",
+    )
+    .bind(user_id)
+    .bind(ong_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(FollowOngResponse {
+        ong_id: id,
+        following,
+    }))
 }
 
 fn filter_ongs(query: OngQuery, db_ongs: Vec<Ong>) -> Vec<Ong> {
@@ -75,10 +91,8 @@ fn filter_ongs(query: OngQuery, db_ongs: Vec<Ong>) -> Vec<Ong> {
     let city = query.city.map(|value| value.to_lowercase());
     let verified_filter = query.verified.unwrap_or(true);
 
-    let mut ongs = db_ongs;
-    ongs.extend(seed_ongs());
-
-    ongs.into_iter()
+    db_ongs
+        .into_iter()
         .filter(|ong| ong.verified == verified_filter)
         .filter(|ong| {
             q.as_ref().map_or(true, |q| {
@@ -94,7 +108,7 @@ fn filter_ongs(query: OngQuery, db_ongs: Vec<Ong>) -> Vec<Ong> {
         .collect()
 }
 
-async fn load_db_ongs(state: &AppState) -> Result<Vec<Ong>, sqlx::Error> {
+pub(crate) async fn load_db_ongs(state: &AppState) -> Result<Vec<Ong>, sqlx::Error> {
     let sql = db_ong_select_sql("");
     let rows = sqlx::query(&sql).fetch_all(&state.db).await?;
 
