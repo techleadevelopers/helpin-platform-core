@@ -3,7 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::Response,
     Json,
 };
@@ -15,6 +15,7 @@ use validator::Validate;
 
 use crate::{
     error::ApiError,
+    services::auth as auth_service,
     state::{AppState, RescueEvent},
 };
 
@@ -75,7 +76,9 @@ pub struct IncidentResponse {
     pub status: &'static str,
 }
 
-pub async fn list_active(State(state): State<AppState>) -> Result<Json<Vec<RescueSession>>, ApiError> {
+pub async fn list_active(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<RescueSession>>, ApiError> {
     let rows = sqlx::query(
         r#"
         SELECT id, post_id, status, lat, lng, accuracy, created_at, updated_at
@@ -93,6 +96,7 @@ pub async fn list_active(State(state): State<AppState>) -> Result<Json<Vec<Rescu
 }
 
 pub async fn trigger(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<TriggerRescueRequest>,
 ) -> Result<(StatusCode, Json<RescueResponse>), ApiError> {
@@ -103,13 +107,14 @@ pub async fn trigger(
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
         r#"
-        INSERT INTO rescue_sessions (id, post_id, status, lat, lng, accuracy)
-        VALUES ($1, $2, 'active', $3, $4, $5)
+        INSERT INTO rescue_sessions (id, post_id, reporter_user_id, status, lat, lng, accuracy)
+        VALUES ($1, $2, $3, 'active', $4, $5, $6)
         RETURNING id, post_id, status, lat, lng, accuracy, created_at, updated_at
         "#,
     )
     .bind(Uuid::now_v7())
     .bind(&payload.post_id)
+    .bind(optional_user_id(&state, &headers))
     .bind(payload.lat)
     .bind(payload.lng)
     .bind(payload.accuracy)
@@ -195,12 +200,11 @@ pub async fn incident(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+    let exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
 
     if !exists {
         return Err(ApiError::NotFound);
@@ -235,12 +239,11 @@ pub async fn rescue_ws(
     Path(id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+    let exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
 
     if !exists {
         return Err(ApiError::NotFound);
@@ -345,4 +348,19 @@ fn broadcast_rescue_event(state: &AppState, rescue: &RescueSession) {
         accuracy: rescue.accuracy,
         updated_at: rescue.updated_at.clone(),
     });
+}
+
+fn optional_user_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })?;
+
+    auth_service::verify_access_token(&state.config, token)
+        .ok()
+        .and_then(|claims| Uuid::parse_str(&claims.sub).ok())
 }
