@@ -18,6 +18,8 @@ pub struct ObservabilityStatus {
     pub redis_rate_limit: &'static str,
     pub event_bus: &'static str,
     pub push_worker: &'static str,
+    pub postgis: &'static str,
+    pub payments: &'static str,
     pub payment_provider: String,
     pub queued_push_jobs: i64,
     pub dead_letter_push_jobs: i64,
@@ -65,6 +67,16 @@ pub async fn status(State(state): State<AppState>) -> Json<ObservabilityStatus> 
             "enabled"
         } else {
             "disabled"
+        },
+        postgis: if state.config.postgis_enabled {
+            "enabled"
+        } else {
+            "disabled_lat_lng_fallback"
+        },
+        payments: if state.config.payments_enabled {
+            "enabled"
+        } else {
+            "disabled_until_community_support_phase"
         },
         payment_provider: state.config.payment_provider.clone(),
         queued_push_jobs,
