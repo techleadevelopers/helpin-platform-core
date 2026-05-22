@@ -389,7 +389,7 @@ fn optional_string(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> 
 }
 
 fn broadcast_rescue_event(state: &AppState, rescue: &RescueSession) {
-    let _ = state.rescue_tx.send(RescueEvent {
+    let event = RescueEvent {
         rescue_id: rescue.id.clone(),
         post_id: rescue.post_id.clone(),
         status: rescue.status.clone(),
@@ -397,6 +397,11 @@ fn broadcast_rescue_event(state: &AppState, rescue: &RescueSession) {
         lng: rescue.lng,
         accuracy: rescue.accuracy,
         updated_at: rescue.updated_at.clone(),
+    };
+    let _ = state.rescue_tx.send(event.clone());
+    let bus = state.event_bus.clone();
+    tokio::spawn(async move {
+        bus.publish_rescue(&event).await;
     });
 }
 
