@@ -39,11 +39,22 @@ pub struct WsAuthQuery {
     pub access_token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListRoomsQuery {
+    pub post_id: Option<String>,
+}
+
 pub async fn list_rooms(
     headers: HeaderMap,
     State(state): State<AppState>,
+    Query(query): Query<ListRoomsQuery>,
 ) -> Result<Json<Vec<ChatConversation>>, ApiError> {
     authenticate_request(&state, &headers)?;
+    let post_id = query
+        .post_id
+        .as_deref()
+        .map(parse_uuid)
+        .transpose()?;
 
     let rows = sqlx::query(
         r#"
@@ -68,10 +79,12 @@ pub async fn list_rooms(
           ORDER BY created_at DESC
           LIMIT 1
         ) last_message ON true
+        WHERE ($1::uuid IS NULL OR r.post_id = $1)
         ORDER BY COALESCE(last_message.created_at, r.created_at) DESC
         LIMIT 100
         "#,
     )
+    .bind(post_id)
     .fetch_all(&state.db)
     .await?;
 
