@@ -32,7 +32,10 @@ pub async fn list_ongs(
     Query(query): Query<OngQuery>,
 ) -> Json<Vec<Ong>> {
     let db_ongs = load_db_ongs(&state).await.unwrap_or_else(|error| {
-        tracing::warn!(?error, "database ONG list unavailable; using seed ONGs only");
+        tracing::warn!(
+            ?error,
+            "database ONG list unavailable; using seed ONGs only"
+        );
         Vec::new()
     });
 
@@ -75,8 +78,7 @@ fn filter_ongs(query: OngQuery, db_ongs: Vec<Ong>) -> Vec<Ong> {
     let mut ongs = db_ongs;
     ongs.extend(seed_ongs());
 
-    ongs
-        .into_iter()
+    ongs.into_iter()
         .filter(|ong| ong.verified == verified_filter)
         .filter(|ong| {
             q.as_ref().map_or(true, |q| {
@@ -94,19 +96,14 @@ fn filter_ongs(query: OngQuery, db_ongs: Vec<Ong>) -> Vec<Ong> {
 
 async fn load_db_ongs(state: &AppState) -> Result<Vec<Ong>, sqlx::Error> {
     let sql = db_ong_select_sql("");
-    let rows = sqlx::query(&sql)
-        .fetch_all(&state.db)
-        .await?;
+    let rows = sqlx::query(&sql).fetch_all(&state.db).await?;
 
     Ok(rows.into_iter().map(row_to_ong).collect())
 }
 
 async fn load_db_ong(state: &AppState, id: Uuid) -> Result<Option<Ong>, sqlx::Error> {
     let sql = db_ong_select_sql("WHERE op.id = $1 AND op.verification_status = 'APPROVED'");
-    let row = sqlx::query(&sql)
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
+    let row = sqlx::query(&sql).bind(id).fetch_optional(&state.db).await?;
 
     Ok(row.map(row_to_ong))
 }
@@ -151,11 +148,15 @@ fn row_to_ong(row: sqlx::postgres::PgRow) -> Ong {
     let short_name = initials(&name);
     let city_label = city.clone().unwrap_or_else(|| "Brasil".into());
     let state_label = state.clone().unwrap_or_default();
-    let location = [neighborhood, Some(city_label.clone()), (!state_label.is_empty()).then_some(state_label.clone())]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(", ");
+    let location = [
+        neighborhood,
+        Some(city_label.clone()),
+        (!state_label.is_empty()).then_some(state_label.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
 
     Ong {
         id: row.get::<Uuid, _>("id").to_string(),
@@ -178,7 +179,9 @@ fn row_to_ong(row: sqlx::postgres::PgRow) -> Ong {
         followers: 0,
         since: created_at.year().to_string(),
         cnpj: row.get::<Option<String>, _>("cnpj").unwrap_or_default(),
-        contact: row.get::<Option<String>, _>("contact_phone").unwrap_or_default(),
+        contact: row
+            .get::<Option<String>, _>("contact_phone")
+            .unwrap_or_default(),
         cause: row
             .get::<Option<String>, _>("area_type")
             .unwrap_or_else(|| "Protecao animal".into()),
