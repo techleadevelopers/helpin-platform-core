@@ -85,7 +85,8 @@ pub(crate) async fn load_db_posts(
     let post_type = query.post_type.as_ref().map(post_type_as_str);
     let author_type = query.author_type.as_ref().map(account_type_as_str);
 
-    let rows = sqlx::query(
+    let use_postgis = state.config.postgis_enabled && query.lat.is_some() && query.lng.is_some();
+    let sql = if use_postgis {
         r#"
         SELECT
             p.id::text AS id,
@@ -141,8 +142,72 @@ pub(crate) async fn load_db_posts(
           CASE WHEN p.urgent THEN 1 ELSE 0 END DESC,
           p.created_at DESC
         LIMIT $8
-        "#,
-    )
+        "#
+    } else {
+        r#"
+        SELECT
+            p.id::text AS id,
+            p.post_type::text AS post_type,
+            p.animal_type,
+            COALESCE(p.name, 'Publicacao') AS name,
+            COALESCE(p.breed, '') AS breed,
+            COALESCE(p.age, '') AS age,
+            p.description,
+            COALESCE(p.location_label, '') AS location,
+            COALESCE(p.neighborhood, p.location_label, '') AS neighborhood,
+            (
+                SELECT pm.public_url
+                FROM post_media pm
+                WHERE pm.post_id = p.id
+                ORDER BY pm.sort_order ASC, pm.created_at ASC
+                LIMIT 1
+            ) AS image,
+            p.text_only,
+            p.likes_count,
+            p.comments_count,
+            p.shares_count,
+            p.urgent,
+            p.created_at,
+            p.contact,
+            p.tags,
+            COALESCE(p.latitude, -23.5505) AS latitude,
+            COALESCE(p.longitude, -46.6333) AS longitude,
+            u.id::text AS author_id,
+            u.name AS author_name,
+            u.avatar_url AS author_avatar,
+            u.verified AS author_verified,
+            u.account_type::text AS author_type
+        FROM posts p
+        INNER JOIN users u ON u.id = p.author_id
+        WHERE p.moderation_status = 'approved'
+          AND u.deleted_at IS NULL
+          AND ($1::post_type IS NULL OR p.post_type = $1::post_type)
+          AND ($2::account_type IS NULL OR u.account_type = $2::account_type)
+          AND ($3::boolean IS NULL OR p.urgent = $3)
+          AND ($4::timestamptz IS NULL OR p.created_at < $4)
+          AND (
+            $5::double precision IS NULL
+            OR $6::double precision IS NULL
+            OR (
+              p.latitude BETWEEN $5 - ($7 / 111000.0) AND $5 + ($7 / 111000.0)
+              AND p.longitude BETWEEN
+                $6 - ($7 / (111000.0 * GREATEST(abs(cos(radians($5))), 0.2)))
+                AND
+                $6 + ($7 / (111000.0 * GREATEST(abs(cos(radians($5))), 0.2)))
+            )
+          )
+        ORDER BY
+          CASE WHEN p.urgent THEN 1 ELSE 0 END DESC,
+          CASE
+            WHEN $5::double precision IS NULL OR $6::double precision IS NULL THEN 0
+            ELSE ((p.latitude - $5) * (p.latitude - $5)) + ((p.longitude - $6) * (p.longitude - $6))
+          END ASC,
+          p.created_at DESC
+        LIMIT $8
+        "#
+    };
+
+    let rows = sqlx::query(sql)
     .bind(post_type)
     .bind(author_type)
     .bind(query.urgent)
