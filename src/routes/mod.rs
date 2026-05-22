@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
             patch(admin::update_ong_verification_status),
         )
         .route("/v1/me", delete(auth::delete_account))
+        .route("/v1/me/avatar", patch(auth::update_avatar))
         .route("/v1/feed", get(feed::list_feed))
         .route("/v1/posts", post(posts::create_post))
         .route("/v1/posts/:id", get(posts::get_post))
