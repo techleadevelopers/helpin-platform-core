@@ -4,6 +4,8 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 use crate::{domain::Post, services::geo::haversine_km};
 
@@ -156,6 +158,193 @@ impl NotificationEngine {
             alerts.pop_back();
         }
     }
+}
+
+pub fn push_platform_as_str(platform: &PushPlatform) -> &'static str {
+    match platform {
+        PushPlatform::Ios => "ios",
+        PushPlatform::Android => "android",
+        PushPlatform::Expo => "expo",
+        PushPlatform::Web => "web",
+    }
+}
+
+pub fn push_platform_from_str(value: &str) -> PushPlatform {
+    match value {
+        "ios" => PushPlatform::Ios,
+        "android" => PushPlatform::Android,
+        "web" => PushPlatform::Web,
+        _ => PushPlatform::Expo,
+    }
+}
+
+pub async fn upsert_persistent_subscription(
+    db: &PgPool,
+    user_id: Uuid,
+    subscription: &PushSubscription,
+) -> Result<usize, sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO push_subscriptions (
+          user_id, push_token, platform, lat, lng, radius_km, critical_alerts, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+        ON CONFLICT (push_token)
+        DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          platform = EXCLUDED.platform,
+          lat = EXCLUDED.lat,
+          lng = EXCLUDED.lng,
+          radius_km = EXCLUDED.radius_km,
+          critical_alerts = EXCLUDED.critical_alerts,
+          updated_at = now()
+        "#,
+    )
+    .bind(user_id)
+    .bind(&subscription.push_token)
+    .bind(push_platform_as_str(&subscription.platform))
+    .bind(subscription.lat)
+    .bind(subscription.lng)
+    .bind(subscription.radius_km)
+    .bind(subscription.critical_alerts)
+    .execute(db)
+    .await?;
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM push_subscriptions")
+        .fetch_one(db)
+        .await?;
+    Ok(count as usize)
+}
+
+pub async fn dispatch_persistent_rescue_alert(
+    db: &PgPool,
+    post: &Post,
+    default_radius_km: f64,
+) -> Result<RescueAlert, sqlx::Error> {
+    let radius_km = if post.urgent { 8.0 } else { default_radius_km }.clamp(1.0, 50.0);
+    let title = if post.urgent {
+        "Resgate urgente perto de voce".to_string()
+    } else {
+        "Animal precisa de ajuda perto de voce".to_string()
+    };
+    let body = format!(
+        "{} em {}. Toque para ir ao local ou apoiar pelo chat.",
+        post.name, post.neighborhood
+    );
+
+    let rows = sqlx::query(
+        r#"
+        SELECT user_id, push_token, platform, lat, lng, radius_km
+        FROM push_subscriptions
+        WHERE updated_at > now() - interval '90 days'
+        "#,
+    )
+    .fetch_all(db)
+    .await?;
+
+    let mut recipients: Vec<_> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let subscription_radius: f64 = row.get("radius_km");
+            let distance = haversine_km(post.latitude, post.longitude, row.get("lat"), row.get("lng"));
+            let effective_radius = radius_km.min(subscription_radius);
+            (distance <= effective_radius).then_some(AlertRecipient {
+                user_id: row.get::<Uuid, _>("user_id").to_string(),
+                push_token: row.get("push_token"),
+                platform: push_platform_from_str(row.get::<&str, _>("platform")),
+                distance_km: (distance * 10.0).round() / 10.0,
+                delivery_status: "queued",
+            })
+        })
+        .collect();
+    recipients.sort_by(|a, b| a.distance_km.total_cmp(&b.distance_km));
+
+    let alert = RescueAlert {
+        id: Uuid::now_v7().to_string(),
+        post_id: post.id.clone(),
+        title,
+        body,
+        image_url: post.image.clone(),
+        lat: post.latitude,
+        lng: post.longitude,
+        radius_km,
+        critical: post.urgent,
+        actions: vec![
+            NotificationAction {
+                id: "go_to_location",
+                label: "Ir ao local",
+                deep_link: format!("zoohelp://post/{}?action=route", post.id),
+            },
+            NotificationAction {
+                id: "remote_support",
+                label: "Apoiar remoto",
+                deep_link: format!("zoohelp://post/{}?action=chat", post.id),
+            },
+        ],
+        recipients,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    persist_rescue_alert(db, &alert).await?;
+    Ok(alert)
+}
+
+pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<(), sqlx::Error> {
+    if alert.recipients.is_empty() {
+        sqlx::query(
+            r#"
+            INSERT INTO notification_events (
+              kind, title, body, post_id, image_url, critical, deeplink,
+              dedupe_key, ttl_seconds, category, payload
+            )
+            VALUES ('rescue_alert', $1, $2, $3, $4, $5, $6, $7, 900, 'rescue', $8)
+            "#,
+        )
+        .bind(&alert.title)
+        .bind(&alert.body)
+        .bind(&alert.post_id)
+        .bind(alert.image_url.as_deref())
+        .bind(alert.critical)
+        .bind(format!("zoohelp://post/{}", alert.post_id))
+        .bind(format!("rescue:{}", alert.post_id))
+        .bind(serde_json::json!({ "alertId": alert.id, "radiusKm": alert.radius_km }))
+        .execute(db)
+        .await?;
+        return Ok(());
+    }
+
+    for recipient in &alert.recipients {
+        let user_id = Uuid::parse_str(&recipient.user_id).ok();
+        sqlx::query(
+            r#"
+            INSERT INTO notification_events (
+              user_id, kind, title, body, post_id, image_url, distance_km, critical,
+              deeplink, dedupe_key, ttl_seconds, category, payload
+            )
+            VALUES ($1, 'rescue_alert', $2, $3, $4, $5, $6, $7, $8, $9, 900, 'rescue', $10)
+            "#,
+        )
+        .bind(user_id)
+        .bind(&alert.title)
+        .bind(&alert.body)
+        .bind(&alert.post_id)
+        .bind(alert.image_url.as_deref())
+        .bind(recipient.distance_km)
+        .bind(alert.critical)
+        .bind(format!("zoohelp://post/{}", alert.post_id))
+        .bind(format!("rescue:{}", alert.post_id))
+        .bind(serde_json::json!({
+            "alertId": alert.id,
+            "pushToken": recipient.push_token,
+            "platform": push_platform_as_str(&recipient.platform),
+            "deliveryStatus": recipient.delivery_status,
+            "radiusKm": alert.radius_km
+        }))
+        .execute(db)
+        .await?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
