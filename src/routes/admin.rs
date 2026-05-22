@@ -50,6 +50,93 @@ pub struct AdminOngProfile {
     pub total_earnings: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserProfile {
+    pub id: String,
+    pub name: String,
+    pub full_name: String,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub verified: bool,
+    pub verification_status: Option<String>,
+    pub phone: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub completed_bookings_count: i32,
+    pub total_spent: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub async fn list_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AdminUserProfile>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          u.id,
+          u.name,
+          u.email::text AS email,
+          u.avatar_url,
+          u.account_type::text AS account_type,
+          u.verified,
+          u.created_at,
+          op.verification_status,
+          op.contact_phone,
+          op.city,
+          op.state
+        FROM users u
+        LEFT JOIN ong_profiles op ON op.user_id = u.id
+        ORDER BY u.created_at DESC
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows.into_iter().map(row_to_admin_user).collect()))
+}
+
+pub async fn get_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AdminUserProfile>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+          u.id,
+          u.name,
+          u.email::text AS email,
+          u.avatar_url,
+          u.account_type::text AS account_type,
+          u.verified,
+          u.created_at,
+          op.verification_status,
+          op.contact_phone,
+          op.city,
+          op.state
+        FROM users u
+        LEFT JOIN ong_profiles op ON op.user_id = u.id
+        WHERE u.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(row_to_admin_user(row)))
+}
+
 pub async fn pending_ongs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -252,5 +339,35 @@ fn row_to_admin_ong(row: sqlx::postgres::PgRow) -> AdminOngProfile {
         five_star_review_count: 0,
         monthly_bookings_count: 0,
         total_earnings: "0.00".into(),
+    }
+}
+
+fn row_to_admin_user(row: sqlx::postgres::PgRow) -> AdminUserProfile {
+    let account_type: String = row.get("account_type");
+    let role = match account_type.as_str() {
+        "admin" => "ADMIN",
+        "ong" | "vet" => "PROVIDER",
+        _ => "CLIENT",
+    };
+    let verified: bool = row.get("verified");
+    let created_at: DateTime<Utc> = row.get("created_at");
+
+    AdminUserProfile {
+        id: row.get::<Uuid, _>("id").to_string(),
+        name: row.get("name"),
+        full_name: row.get("name"),
+        email: row.get("email"),
+        avatar_url: row.get("avatar_url"),
+        role: role.into(),
+        status: "active".into(),
+        verified,
+        verification_status: row.get("verification_status"),
+        phone: row.get("contact_phone"),
+        city: row.get("city"),
+        state: row.get("state"),
+        completed_bookings_count: 0,
+        total_spent: "0.00".into(),
+        created_at,
+        updated_at: created_at,
     }
 }
