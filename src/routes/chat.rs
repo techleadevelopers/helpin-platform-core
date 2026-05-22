@@ -299,7 +299,11 @@ fn broadcast_chat_message(state: &AppState, room_id: &str, message: &ChatMessage
         body: message.body.clone(),
         created_at: message.created_at.clone(),
     };
-    let _ = state.chat_tx.send(event);
+    let _ = state.chat_tx.send(event.clone());
+    let bus = state.event_bus.clone();
+    tokio::spawn(async move {
+        bus.publish_chat(&event).await;
+    });
 }
 
 fn parse_uuid(value: &str) -> Result<Uuid, ApiError> {
