@@ -61,6 +61,9 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         $$;
         "#,
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url text;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS anonymized_at timestamptz;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS retention_delete_after timestamptz;",
         "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS cep text;",
         "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS street text;",
         "ALTER TABLE ong_profiles ADD COLUMN IF NOT EXISTS number text;",
@@ -96,6 +99,58 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         );
         "#,
         "CREATE INDEX IF NOT EXISTS media_upload_intents_user_idx ON media_upload_intents (user_id, created_at DESC);",
+        r#"
+        CREATE TABLE IF NOT EXISTS audit_events (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+          action text NOT NULL,
+          target_type text,
+          target_id text,
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS audit_events_actor_created_idx ON audit_events (actor_user_id, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS audit_events_action_created_idx ON audit_events (action, created_at DESC);",
+        r#"
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          push_token text NOT NULL UNIQUE,
+          platform text NOT NULL CHECK (platform IN ('ios', 'android', 'expo', 'web')),
+          lat double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
+          lng double precision NOT NULL CHECK (lng BETWEEN -180 AND 180),
+          radius_km double precision NOT NULL DEFAULT 8 CHECK (radius_km BETWEEN 1 AND 50),
+          critical_alerts boolean NOT NULL DEFAULT false,
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS push_subscriptions_user_idx ON push_subscriptions (user_id, updated_at DESC);",
+        "CREATE INDEX IF NOT EXISTS push_subscriptions_location_idx ON push_subscriptions (lat, lng);",
+        r#"
+        CREATE TABLE IF NOT EXISTS notification_events (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+          kind text NOT NULL,
+          title text NOT NULL,
+          body text NOT NULL,
+          post_id text,
+          image_url text,
+          distance_km double precision,
+          critical boolean NOT NULL DEFAULT false,
+          deeplink text,
+          dedupe_key text,
+          ttl_seconds integer,
+          category text,
+          payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+          read_at timestamptz,
+          acked_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS notification_events_user_created_idx ON notification_events (user_id, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS notification_events_dedupe_idx ON notification_events (dedupe_key, user_id);",
         r#"
         CREATE TABLE IF NOT EXISTS post_media (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -158,6 +213,18 @@ async fn ensure_runtime_schema(db: &PgPool) -> anyhow::Result<()> {
         "CREATE INDEX IF NOT EXISTS rescue_sessions_location_idx ON rescue_sessions (lat, lng) WHERE status = 'active';",
         "CREATE INDEX IF NOT EXISTS rescue_location_points_rescue_recorded_idx ON rescue_location_points (rescue_id, recorded_at DESC);",
         "CREATE INDEX IF NOT EXISTS rescue_incidents_rescue_created_idx ON rescue_incidents (rescue_id, created_at DESC);",
+        r#"
+        CREATE TABLE IF NOT EXISTS donation_ledger_entries (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          donation_id uuid NOT NULL REFERENCES donations(id) ON DELETE CASCADE,
+          entry_type text NOT NULL,
+          amount_cents bigint NOT NULL,
+          currency char(3) NOT NULL,
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS donation_ledger_entries_donation_idx ON donation_ledger_entries (donation_id, created_at);",
     ];
 
     for statement in statements {
