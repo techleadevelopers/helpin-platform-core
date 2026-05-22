@@ -300,6 +300,10 @@ pub async fn create_post(
         persisted.id = media_id.to_string();
         stored_media.push(persisted);
     }
+    sqlx::query("INSERT INTO chat_rooms (post_id) VALUES ($1)")
+        .bind(post_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     let post = Post {
