@@ -390,10 +390,7 @@ async fn find_user_by_email(
     Ok(row.map(row_to_user_record))
 }
 
-async fn find_user_by_id(
-    state: &AppState,
-    id: Uuid,
-) -> Result<Option<UserRecord>, sqlx::Error> {
+async fn find_user_by_id(state: &AppState, id: Uuid) -> Result<Option<UserRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
