@@ -124,6 +124,7 @@ pub async fn trigger(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
+    let reporter_user_id = authenticate_user(&state, &headers)?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -135,7 +136,7 @@ pub async fn trigger(
     )
     .bind(Uuid::now_v7())
     .bind(&payload.post_id)
-    .bind(optional_user_id(&state, &headers))
+    .bind(reporter_user_id)
     .bind(payload.lat)
     .bind(payload.lng)
     .bind(payload.accuracy)
@@ -151,6 +152,7 @@ pub async fn trigger(
 }
 
 pub async fn update_location(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(payload): Json<LocationUpdateRequest>,
@@ -158,6 +160,7 @@ pub async fn update_location(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
+    authenticate_user(&state, &headers)?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -189,9 +192,11 @@ pub async fn update_location(
 }
 
 pub async fn end(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RescueResponse>, ApiError> {
+    authenticate_user(&state, &headers)?;
     let row = sqlx::query(
         r#"
         UPDATE rescue_sessions
@@ -213,6 +218,7 @@ pub async fn end(
 }
 
 pub async fn incident(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(payload): Json<IncidentRequest>,
@@ -220,6 +226,7 @@ pub async fn incident(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
+    authenticate_user(&state, &headers)?;
 
     let exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
@@ -256,10 +263,12 @@ pub async fn incident(
 }
 
 pub async fn rescue_ws(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    authenticate_user(&state, &headers)?;
     let exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
             .bind(id)
@@ -391,7 +400,7 @@ fn broadcast_rescue_event(state: &AppState, rescue: &RescueSession) {
     });
 }
 
-fn optional_user_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
+fn authenticate_user(state: &AppState, headers: &HeaderMap) -> Result<Uuid, ApiError> {
     let token = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -399,11 +408,12 @@ fn optional_user_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
             value
                 .strip_prefix("Bearer ")
                 .or_else(|| value.strip_prefix("bearer "))
-        })?;
+        })
+        .ok_or(ApiError::Unauthorized)?;
 
     auth_service::verify_access_token(&state.config, token)
-        .ok()
-        .and_then(|claims| Uuid::parse_str(&claims.sub).ok())
+        .map_err(|_| ApiError::Unauthorized)
+        .and_then(|claims| Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized))
 }
 
 fn authenticate_admin(
