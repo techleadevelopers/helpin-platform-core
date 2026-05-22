@@ -245,7 +245,7 @@ pub async fn create_post(
             latitude, longitude, location_label, neighborhood, contact, tags,
             urgent, text_only, moderation_status, fraud_risk
         )
-        VALUES ($1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'queued', $16)
+        VALUES ($1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'approved', $16)
         RETURNING id
         "#,
     )
@@ -276,7 +276,7 @@ pub async fn create_post(
                 post_id, provider, resource_type, object_key, public_url, content_type,
                 width, height, size_bytes, sort_order, moderation_status
             )
-            VALUES ($1, 'cloudinary', $2, $3, $4, $5, $6, $7, $8, $9, 'queued')
+            VALUES ($1, 'cloudinary', $2, $3, $4, $5, $6, $7, $8, $9, 'approved')
             RETURNING id
             "#,
         )
@@ -345,7 +345,7 @@ pub async fn create_post(
         Json(CreatePostResponse {
             post,
             media: stored_media,
-            moderation_status: "queued",
+            moderation_status: "approved",
             fraud_risk: risk,
             rescue_alert,
         }),
@@ -411,7 +411,7 @@ fn normalize_media(payload: &CreatePostRequest) -> Result<Vec<PostMedia>, ApiErr
                 width: image.width,
                 height: image.height,
                 size_bytes: image.size_bytes,
-                moderation_status: "queued".into(),
+                moderation_status: "approved".into(),
             })
         })
         .collect()
