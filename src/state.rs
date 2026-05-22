@@ -88,7 +88,9 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS shares_count integer NOT NULL DEFAULT 0 CHECK (shares_count >= 0);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderation_status moderation_status NOT NULL DEFAULT 'approved';",
         "ALTER TABLE posts ALTER COLUMN moderation_status SET DEFAULT 'approved';",
-        "UPDATE posts SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
+        "UPDATE posts SET moderation_status = 'approved' WHERE moderation_status IN ('queued', 'needs_review');",
+        "ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_no_pending_visibility;",
+        "ALTER TABLE posts ADD CONSTRAINT posts_no_pending_visibility CHECK (moderation_status NOT IN ('queued', 'needs_review'));",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS idempotency_key text;",
         "CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx ON posts (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
@@ -211,7 +213,9 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         "ALTER TABLE post_media ALTER COLUMN moderation_status SET DEFAULT 'approved';",
-        "UPDATE post_media SET moderation_status = 'approved' WHERE moderation_status = 'queued';",
+        "UPDATE post_media SET moderation_status = 'approved' WHERE moderation_status IN ('queued', 'needs_review');",
+        "ALTER TABLE post_media DROP CONSTRAINT IF EXISTS post_media_no_pending_visibility;",
+        "ALTER TABLE post_media ADD CONSTRAINT post_media_no_pending_visibility CHECK (moderation_status NOT IN ('queued', 'needs_review'));",
         "CREATE INDEX IF NOT EXISTS post_media_post_idx ON post_media (post_id, sort_order);",
         "CREATE INDEX IF NOT EXISTS post_media_moderation_idx ON post_media (moderation_status, created_at);",
         r#"
