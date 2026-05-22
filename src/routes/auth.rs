@@ -142,7 +142,8 @@ pub async fn login(
         &format!("auth:login:{}", payload.email),
         10,
         StdDuration::from_secs(60),
-    )?;
+    )
+    .await?;
 
     match find_user_by_email(&state, &payload.email).await {
         Ok(Some(record)) => {
@@ -200,7 +201,8 @@ pub async fn register(
         &format!("auth:register:{}", payload.email),
         5,
         StdDuration::from_secs(300),
-    )?;
+    )
+    .await?;
 
     let account_type = payload.account_type.clone().unwrap_or(AccountType::Person);
     let password_hash = auth_service::hash_password(&payload.password).map_err(|error| {
