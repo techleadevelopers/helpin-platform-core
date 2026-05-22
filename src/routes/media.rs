@@ -1,9 +1,20 @@
-use axum::{extract::State, http::StatusCode, Json};
+use std::time::Duration as StdDuration;
+
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use validator::Validate;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{
+    error::ApiError,
+    routes::auth::authenticate_request,
+    services::rate_limit,
+    state::AppState,
+};
 
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 100 * 1024 * 1024;
@@ -49,12 +60,22 @@ pub struct CloudinaryUploadFields {
 }
 
 pub async fn create_upload_intent(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<CreateUploadIntentRequest>,
 ) -> Result<(StatusCode, Json<UploadIntentResponse>), ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+
+    rate_limit::check_key(
+        &state,
+        &format!("media:upload-intent:{user_id}"),
+        30,
+        StdDuration::from_secs(60),
+    )?;
 
     let media_kind = media_kind(&payload.content_type).ok_or_else(|| {
         ApiError::Validation(format!(
@@ -96,7 +117,7 @@ pub async fn create_upload_intent(
         }
     }
 
-    let upload_id = uuid::Uuid::now_v7().to_string();
+    let upload_id = uuid::Uuid::now_v7();
     let safe_file_name = payload
         .file_name
         .chars()
@@ -119,15 +140,42 @@ pub async fn create_upload_intent(
         format!("folder={folder}&public_id={public_id}&timestamp={timestamp}{api_secret}");
     let signature = format!("{:x}", Sha1::digest(signature_payload.as_bytes()));
 
+    let upload_url = format!("https://api.cloudinary.com/v1_1/{cloud_name}/{media_kind}/upload");
+    let public_url = format!(
+        "https://res.cloudinary.com/{cloud_name}/{media_kind}/upload/{object_key}"
+    );
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(i64::from(UPLOAD_TTL_SECONDS));
+
+    sqlx::query(
+        r#"
+        INSERT INTO media_upload_intents (
+          id, user_id, provider, resource_type, object_key, file_name, content_type,
+          size_bytes, checksum_sha256, upload_url, public_url, expires_at
+        )
+        VALUES ($1, $2, 'cloudinary', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(upload_id)
+    .bind(user_id)
+    .bind(media_kind)
+    .bind(&object_key)
+    .bind(&payload.file_name)
+    .bind(&payload.content_type)
+    .bind(payload.size_bytes as i64)
+    .bind(payload.checksum_sha256.as_deref())
+    .bind(&upload_url)
+    .bind(&public_url)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await?;
+
     Ok((
         StatusCode::CREATED,
         Json(UploadIntentResponse {
             provider: "cloudinary",
-            upload_id,
-            upload_url: format!("https://api.cloudinary.com/v1_1/{cloud_name}/{media_kind}/upload"),
-            public_url: format!(
-                "https://res.cloudinary.com/{cloud_name}/{media_kind}/upload/{object_key}"
-            ),
+            upload_id: upload_id.to_string(),
+            upload_url,
+            public_url,
             object_key,
             resource_type: media_kind,
             expires_in_seconds: UPLOAD_TTL_SECONDS,
