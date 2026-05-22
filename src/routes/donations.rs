@@ -53,6 +53,10 @@ pub async fn create_intent(
     State(state): State<AppState>,
     Json(payload): Json<DonationIntentRequest>,
 ) -> Result<Json<DonationIntentResponse>, ApiError> {
+    if !state.config.payments_enabled {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
@@ -134,6 +138,10 @@ pub async fn payment_webhook(
     headers: HeaderMap,
     Json(payload): Json<PaymentWebhookRequest>,
 ) -> Result<Json<PaymentWebhookResponse>, ApiError> {
+    if !state.config.payments_enabled {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
     verify_webhook_secret(&state, &headers)?;
     if provider != state.config.payment_provider {
         return Err(ApiError::NotFound);
