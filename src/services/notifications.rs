@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -9,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{domain::Post, services::geo::haversine_km};
 
+#[cfg(test)]
 const MAX_RECENT_ALERTS: usize = 200;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -68,12 +70,15 @@ pub struct NotificationAction {
     pub deep_link: String,
 }
 
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub struct NotificationEngine {
     subscriptions: Arc<Mutex<HashMap<String, PushSubscription>>>,
+    #[cfg(test)]
     recent_alerts: Arc<Mutex<VecDeque<RescueAlert>>>,
 }
 
+#[cfg(test)]
 impl NotificationEngine {
     pub fn upsert_subscription(&self, subscription: PushSubscription) -> usize {
         let mut subscriptions = self.subscriptions.lock().expect("notification lock");
@@ -81,15 +86,7 @@ impl NotificationEngine {
         subscriptions.len()
     }
 
-    pub fn list_recent_alerts(&self) -> Vec<RescueAlert> {
-        self.recent_alerts
-            .lock()
-            .expect("notification alerts lock")
-            .iter()
-            .cloned()
-            .collect()
-    }
-
+    #[cfg(test)]
     pub fn dispatch_rescue_alert(&self, post: &Post, default_radius_km: f64) -> RescueAlert {
         let radius_km = if post.urgent { 8.0 } else { default_radius_km }.clamp(1.0, 50.0);
         let recipients = self.nearby_recipients(post.latitude, post.longitude, radius_km);
@@ -131,6 +128,7 @@ impl NotificationEngine {
         alert
     }
 
+    #[cfg(test)]
     fn nearby_recipients(&self, lat: f64, lng: f64, radius_km: f64) -> Vec<AlertRecipient> {
         let subscriptions = self.subscriptions.lock().expect("notification lock");
         let mut recipients: Vec<_> = subscriptions
@@ -151,6 +149,7 @@ impl NotificationEngine {
         recipients
     }
 
+    #[cfg(test)]
     fn store_alert(&self, alert: RescueAlert) {
         let mut alerts = self.recent_alerts.lock().expect("notification alerts lock");
         alerts.push_front(alert);
