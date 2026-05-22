@@ -246,7 +246,12 @@ pub async fn dispatch_persistent_rescue_alert(
         .into_iter()
         .filter_map(|row| {
             let subscription_radius: f64 = row.get("radius_km");
-            let distance = haversine_km(post.latitude, post.longitude, row.get("lat"), row.get("lng"));
+            let distance = haversine_km(
+                post.latitude,
+                post.longitude,
+                row.get("lat"),
+                row.get("lng"),
+            );
             let effective_radius = radius_km.min(subscription_radius);
             (distance <= effective_radius).then_some(AlertRecipient {
                 user_id: row.get::<Uuid, _>("user_id").to_string(),
