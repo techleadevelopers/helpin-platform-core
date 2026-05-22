@@ -19,6 +19,8 @@ pub enum ApiError {
     TooManyRequests,
     #[error("not found")]
     NotFound,
+    #[error("service unavailable")]
+    ServiceUnavailable,
     #[error("internal error")]
     Internal,
 }
@@ -45,6 +47,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::NotFound => StatusCode::NOT_FOUND,
+            ApiError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(ErrorBody {
