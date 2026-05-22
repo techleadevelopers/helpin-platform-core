@@ -265,7 +265,7 @@ mod tests {
                     "postType": "adoption",
                     "animalType": "dog",
                     "description": "",
-                    "location": "Sío Paulo, SP"
+                    "location": "São Paulo, SP"
                 })
                 .to_string(),
             ))
