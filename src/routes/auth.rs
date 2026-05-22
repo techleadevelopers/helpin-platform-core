@@ -159,7 +159,7 @@ pub async fn login(
                 .map(Json)
         }
         Ok(None) => Err(ApiError::Unauthorized),
-        Err(error) => {
+        Err(error) if state.config.is_development() => {
             tracing::warn!(
                 ?error,
                 "database login path unavailable; using dev fallback"
@@ -180,6 +180,10 @@ pub async fn login(
                 None,
             )
             .map(Json)
+        }
+        Err(error) => {
+            tracing::error!(?error, "database login path unavailable");
+            Err(ApiError::ServiceUnavailable)
         }
     }
 }
@@ -216,7 +220,7 @@ pub async fn register(
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
             Err(ApiError::Conflict("email already registered".into()))
         }
-        Err(error) => {
+        Err(error) if state.config.is_development() => {
             tracing::warn!(
                 ?error,
                 "database register path unavailable; using dev fallback"
@@ -239,6 +243,10 @@ pub async fn register(
                 tracing::warn!(?error, "fallback email verification send failed");
             }
             Ok(Json(response))
+        }
+        Err(error) => {
+            tracing::error!(?error, "database register path unavailable");
+            Err(ApiError::ServiceUnavailable)
         }
     }
 }
@@ -318,8 +326,52 @@ pub async fn me(
     Ok(Json(current_user_response(record, ong_record)))
 }
 
-pub async fn delete_account() -> Json<ActionQueuedResponse> {
-    Json(ActionQueuedResponse { status: "deleted" })
+pub async fn delete_account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ActionQueuedResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let anonymized_email = format!("deleted+{}@zoohelp.local", user_id);
+
+    let result = sqlx::query(
+        r#"
+        UPDATE users
+        SET
+          name = 'Deleted user',
+          email = $2,
+          avatar_url = NULL,
+          verified = false,
+          deleted_at = now(),
+          anonymized_at = now(),
+          retention_delete_after = now() + interval '90 days'
+        WHERE id = $1
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .bind(anonymized_email)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    let _ = sqlx::query("UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&state.db)
+        .await;
+
+    audit_event(
+        &state,
+        Some(user_id),
+        "user.account.deleted",
+        serde_json::json!({ "retentionDays": 90 }),
+    )
+    .await;
+
+    Ok(Json(ActionQueuedResponse { status: "deleted" }))
 }
 
 pub async fn update_avatar(
@@ -596,7 +648,7 @@ fn new_action_token() -> String {
     format!("{}.{}", Uuid::now_v7(), Uuid::now_v7())
 }
 
-fn authenticate_request(
+pub(crate) fn authenticate_request(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<auth_service::AccessClaims, ApiError> {
@@ -609,6 +661,28 @@ fn authenticate_request(
         .or_else(|| header.strip_prefix("bearer "))
         .ok_or(ApiError::Unauthorized)?;
     auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
+}
+
+pub(crate) async fn audit_event(
+    state: &AppState,
+    actor_id: Option<Uuid>,
+    action: &str,
+    metadata: serde_json::Value,
+) {
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO audit_events (actor_user_id, action, metadata)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(actor_id)
+    .bind(action)
+    .bind(metadata)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(?error, ?actor_id, action, "audit event was not persisted");
+    }
 }
 
 async fn issue_auth_response(
