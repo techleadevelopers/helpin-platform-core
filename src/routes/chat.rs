@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::Response,
@@ -32,6 +32,11 @@ pub struct SendMessageRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageResponse {
     pub message: ChatMessage,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WsAuthQuery {
+    pub access_token: Option<String>,
 }
 
 pub async fn list_rooms(
@@ -133,9 +138,10 @@ pub async fn room_ws(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<WsAuthQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let claims = authenticate_request(&state, &headers)?;
+    let claims = authenticate_socket(&state, &headers, query.access_token.as_deref())?;
     let room_id = parse_uuid(&id)?;
     let sender_id = parse_claim_user_id(&claims)?;
     ensure_room_exists(&state, room_id).await?;
@@ -312,6 +318,22 @@ fn parse_uuid(value: &str) -> Result<Uuid, ApiError> {
 
 fn parse_claim_user_id(claims: &auth_service::AccessClaims) -> Result<Uuid, ApiError> {
     Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)
+}
+
+fn authenticate_socket(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Result<auth_service::AccessClaims, ApiError> {
+    if headers.get(axum::http::header::AUTHORIZATION).is_some() {
+        return authenticate_request(state, headers);
+    }
+
+    let token = query_token
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ApiError::Unauthorized)?;
+
+    auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
 }
 
 fn format_timestamp(value: DateTime<Utc>) -> String {
