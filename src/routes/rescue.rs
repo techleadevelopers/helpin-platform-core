@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::Response,
@@ -37,6 +37,11 @@ pub struct RescueSession {
     pub accuracy: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WsAuthQuery {
+    pub access_token: Option<String>,
 }
 
 #[derive(Deserialize, Validate)]
@@ -124,7 +129,7 @@ pub async fn trigger(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
-    let reporter_user_id = authenticate_user(&state, &headers)?;
+    let reporter_user_id = authenticate_user(&state, &headers, None)?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -160,7 +165,7 @@ pub async fn update_location(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
-    authenticate_user(&state, &headers)?;
+    authenticate_user(&state, &headers, None)?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -196,7 +201,7 @@ pub async fn end(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RescueResponse>, ApiError> {
-    authenticate_user(&state, &headers)?;
+    authenticate_user(&state, &headers, None)?;
     let row = sqlx::query(
         r#"
         UPDATE rescue_sessions
@@ -226,7 +231,7 @@ pub async fn incident(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
-    authenticate_user(&state, &headers)?;
+    authenticate_user(&state, &headers, None)?;
 
     let exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
@@ -266,9 +271,10 @@ pub async fn rescue_ws(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<WsAuthQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    authenticate_user(&state, &headers)?;
+    authenticate_user(&state, &headers, query.access_token.as_deref())?;
     let exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
             .bind(id)
@@ -405,7 +411,11 @@ fn broadcast_rescue_event(state: &AppState, rescue: &RescueSession) {
     });
 }
 
-fn authenticate_user(state: &AppState, headers: &HeaderMap) -> Result<Uuid, ApiError> {
+fn authenticate_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Result<Uuid, ApiError> {
     let token = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -414,6 +424,7 @@ fn authenticate_user(state: &AppState, headers: &HeaderMap) -> Result<Uuid, ApiE
                 .strip_prefix("Bearer ")
                 .or_else(|| value.strip_prefix("bearer "))
         })
+        .or_else(|| query_token.filter(|value| !value.trim().is_empty()))
         .ok_or(ApiError::Unauthorized)?;
 
     auth_service::verify_access_token(&state.config, token)
