@@ -11,7 +11,7 @@ use validator::Validate;
 use crate::{
     domain::{seed_posts, AccountType, AnimalType, Author, Post, PostMedia, PostType},
     error::ApiError,
-    services::notifications::RescueAlert,
+    services::notifications::{dispatch_persistent_rescue_alert, RescueAlert},
     services::{auth as auth_service, fraud},
     state::AppState,
 };
@@ -328,7 +328,7 @@ pub async fn create_post(
     };
 
     let rescue_alert = if requires_geo_alert {
-        let alert = state.notifications.dispatch_rescue_alert(&post, 5.0);
+        let alert = dispatch_persistent_rescue_alert(&state.db, &post, 5.0).await?;
         tracing::info!(
             post_id = %post.id,
             recipients = alert.recipients.len(),
