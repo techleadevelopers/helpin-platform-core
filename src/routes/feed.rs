@@ -2,15 +2,19 @@ use axum::{
     extract::{Query, State},
     Json,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::Row;
 
 use crate::{
-    domain::{seed_posts, AccountType, Author, Post, PostType},
-    routes::posts::{animal_type_from_str, post_type_from_str},
-    services::geo::haversine_km,
+    domain::{AccountType, Author, Post, PostType},
+    error::ApiError,
+    routes::posts::{animal_type_from_str, post_type_as_str, post_type_from_str},
     state::AppState,
 };
+
+#[cfg(test)]
+use crate::services::geo::haversine_km;
 
 #[derive(Debug, Deserialize)]
 pub struct FeedQuery {
@@ -22,28 +26,23 @@ pub struct FeedQuery {
     pub lng: Option<f64>,
     pub radius_km: Option<f64>,
     pub limit: Option<usize>,
+    pub before: Option<DateTime<Utc>>,
 }
 
 pub async fn list_feed(
     State(state): State<AppState>,
     Query(query): Query<FeedQuery>,
-) -> Json<Vec<Post>> {
-    let db_posts = load_db_posts(&state).await.unwrap_or_else(|error| {
-        tracing::warn!(?error, "database feed unavailable; using seed feed only");
-        Vec::new()
-    });
-    Json(rank_feed(query, db_posts))
+) -> Result<Json<Vec<Post>>, ApiError> {
+    Ok(Json(load_db_posts(&state, &query).await?))
 }
 
+#[cfg(test)]
 fn rank_feed(query: FeedQuery, db_posts: Vec<Post>) -> Vec<Post> {
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
     let origin = query.lat.zip(query.lng);
     let radius = query.radius_km.unwrap_or(80.0).clamp(1.0, 500.0);
 
-    let mut posts = db_posts;
-    posts.extend(seed_posts());
-
-    let mut scored: Vec<(f64, Post)> = posts
+    let mut scored: Vec<(f64, Post)> = db_posts
         .into_iter()
         .filter(|post| {
             query
@@ -77,7 +76,15 @@ fn rank_feed(query: FeedQuery, db_posts: Vec<Post>) -> Vec<Post> {
         .collect()
 }
 
-async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
+pub(crate) async fn load_db_posts(
+    state: &AppState,
+    query: &FeedQuery,
+) -> Result<Vec<Post>, sqlx::Error> {
+    let limit = query.limit.unwrap_or(30).clamp(1, 100) as i64;
+    let radius = query.radius_km.unwrap_or(80.0).clamp(1.0, 500.0) * 1000.0;
+    let post_type = query.post_type.as_ref().map(post_type_as_str);
+    let author_type = query.author_type.as_ref().map(account_type_as_str);
+
     let rows = sqlx::query(
         r#"
         SELECT
@@ -102,6 +109,7 @@ async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
             p.comments_count,
             p.shares_count,
             p.urgent,
+            p.created_at,
             p.contact,
             p.tags,
             COALESCE(p.latitude, -23.5505) AS latitude,
@@ -114,10 +122,35 @@ async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
         WHERE p.moderation_status = 'approved'
-        ORDER BY p.created_at DESC
-        LIMIT 100
+          AND u.deleted_at IS NULL
+          AND ($1::post_type IS NULL OR p.post_type = $1::post_type)
+          AND ($2::account_type IS NULL OR u.account_type = $2::account_type)
+          AND ($3::boolean IS NULL OR p.urgent = $3)
+          AND ($4::timestamptz IS NULL OR p.created_at < $4)
+          AND (
+            $5::double precision IS NULL
+            OR $6::double precision IS NULL
+            OR p.geo IS NULL
+            OR ST_DWithin(
+              p.geo,
+              ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography,
+              $7
+            )
+          )
+        ORDER BY
+          CASE WHEN p.urgent THEN 1 ELSE 0 END DESC,
+          p.created_at DESC
+        LIMIT $8
         "#,
     )
+    .bind(post_type)
+    .bind(author_type)
+    .bind(query.urgent)
+    .bind(query.before)
+    .bind(query.lat)
+    .bind(query.lng)
+    .bind(radius)
+    .bind(limit)
     .fetch_all(&state.db)
     .await?;
 
@@ -153,7 +186,7 @@ async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
                 comments: row.get::<i32, _>("comments_count").max(0) as u32,
                 shares: row.get::<i32, _>("shares_count").max(0) as u32,
                 urgent: row.get("urgent"),
-                created_at: "agora".into(),
+                created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
                 contact: row.get("contact"),
                 tags: row.get("tags"),
                 latitude: row.get("latitude"),
@@ -163,6 +196,16 @@ async fn load_db_posts(state: &AppState) -> Result<Vec<Post>, sqlx::Error> {
         .collect())
 }
 
+fn account_type_as_str(value: &AccountType) -> &'static str {
+    match value {
+        AccountType::Person => "person",
+        AccountType::Ong => "ong",
+        AccountType::Vet => "vet",
+        AccountType::Admin => "admin",
+    }
+}
+
+#[cfg(test)]
 fn feed_score(post: &Post, distance_km: Option<f64>) -> f64 {
     let urgency = if post.urgent { 1000.0 } else { 0.0 };
     let kind_weight = match post.post_type {
@@ -184,6 +227,7 @@ fn feed_score(post: &Post, distance_km: Option<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::seed_posts;
 
     #[test]
     fn prioritizes_nearby_urgent_cases_for_logged_user_location() {
@@ -196,8 +240,9 @@ mod tests {
                 lng: Some(-46.6559),
                 radius_km: Some(20.0),
                 limit: Some(10),
+                before: None,
             },
-            Vec::new(),
+            seed_posts(),
         );
 
         assert_eq!(ranked.first().map(|post| post.id.as_str()), Some("2"));
@@ -214,8 +259,9 @@ mod tests {
                 lng: Some(-46.6333),
                 radius_km: Some(5.0),
                 limit: Some(100),
+                before: None,
             },
-            Vec::new(),
+            seed_posts(),
         );
 
         assert!(!ranked.iter().any(|post| post.location == "Campinas, SP"));
