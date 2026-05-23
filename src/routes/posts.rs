@@ -16,7 +16,7 @@ use crate::{
     routes::auth::audit_event,
     services::notifications::{dispatch_persistent_rescue_alert, RescueAlert},
     services::{auth as auth_service, fraud, rate_limit},
-    state::AppState,
+    state::{AppState, FeedEvent},
 };
 
 const MAX_POST_IMAGES: usize = 4;
@@ -441,6 +441,7 @@ pub async fn create_post(
     } else {
         None
     };
+    broadcast_feed_event(&state, &post);
 
     Ok((
         StatusCode::CREATED,
@@ -537,6 +538,13 @@ pub async fn toggle_like(
 ) -> Result<Json<LikeResponse>, ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:like:{user_id}"),
+        state.config.throttle_limit * 6,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     ensure_post_exists(&state, post_id).await?;
 
@@ -585,6 +593,13 @@ pub async fn create_comment(
 
     let claims = authenticate_request(&state, &headers)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:comment:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     ensure_post_exists(&state, post_id).await?;
 
@@ -640,6 +655,13 @@ pub async fn report_post(
 
     let claims = authenticate_request(&state, &headers)?;
     let reporter_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:report:{reporter_id}"),
+        state.config.throttle_limit.max(2) / 2,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds * 5),
+    )
+    .await?;
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     ensure_post_exists(&state, post_id).await?;
 
@@ -676,6 +698,23 @@ pub async fn report_post(
             status: "queued_review",
         }),
     ))
+}
+
+fn broadcast_feed_event(state: &AppState, post: &Post) {
+    let event = FeedEvent {
+        post_id: post.id.clone(),
+        post_type: post_type_as_str(&post.post_type).to_string(),
+        urgent: post.urgent,
+        rescue_status: post.rescue_status.clone(),
+        lat: post.latitude,
+        lng: post.longitude,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let _ = state.feed_tx.send(event.clone());
+    let bus = state.event_bus.clone();
+    tokio::spawn(async move {
+        bus.publish_feed(&event).await;
+    });
 }
 
 async fn ensure_post_exists(state: &AppState, post_id: Uuid) -> Result<(), ApiError> {
