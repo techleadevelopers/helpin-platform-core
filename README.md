@@ -149,7 +149,7 @@ When accepted, the backend generates a `rescueAlert` response:
 ```json
 {
   "critical": true,
-  "radiusKm": 8.0,
+  "radiusKm": 0.03,
   "lat": -23.5505,
   "lng": -46.6333,
   "actions": [
@@ -263,7 +263,7 @@ The practical decision model for rescue visibility is based on signals that can 
 
 The rescue alert radius is currently:
 
-- urgent/emergency: `8 km`
+- urgent/emergency phase-1 sniper push: `0.03 km` / `30 m`
 - default rescue preview: configurable default, currently `5 km`
 - hard clamp: `1 km` to `50 km`
 
