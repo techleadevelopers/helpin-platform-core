@@ -265,6 +265,7 @@ pub async fn create_post(
     let latitude = payload.latitude.unwrap_or(-23.5505);
     let longitude = payload.longitude.unwrap_or(-46.6333);
     let text_only = media.is_empty() && payload.image.is_none();
+    let initial_rescue_status = if requires_geo_alert { "active" } else { "open" };
 
     let mut tx = state.db.begin().await?;
     for (index, item) in media.iter().enumerate() {
@@ -307,13 +308,13 @@ pub async fn create_post(
         INSERT INTO posts (
             author_id, post_type, animal_type, name, breed, age, description,
             latitude, longitude, location_label, neighborhood, contact, tags,
-            urgent, text_only, moderation_status, fraud_risk, geo, idempotency_key
+            urgent, rescue_status, text_only, moderation_status, fraud_risk, geo, idempotency_key
         )
         VALUES (
             $1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, 'approved', $16,
+            $14, $15, $16, 'approved', $17,
             ST_SetSRID(ST_MakePoint($9, $8), 4326)::geography,
-            $17
+            $18
         )
         RETURNING id
         "#
@@ -322,11 +323,11 @@ pub async fn create_post(
         INSERT INTO posts (
             author_id, post_type, animal_type, name, breed, age, description,
             latitude, longitude, location_label, neighborhood, contact, tags,
-            urgent, text_only, moderation_status, fraud_risk, idempotency_key
+            urgent, rescue_status, text_only, moderation_status, fraud_risk, idempotency_key
         )
         VALUES (
             $1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, 'approved', $16, $17
+            $14, $15, $16, 'approved', $17, $18
         )
         RETURNING id
         "#
@@ -347,6 +348,7 @@ pub async fn create_post(
         .bind(&contact)
         .bind(&tags)
         .bind(is_urgent)
+        .bind(initial_rescue_status)
         .bind(text_only)
         .bind(i16::from(risk))
         .bind(idempotency_key)
@@ -409,6 +411,8 @@ pub async fn create_post(
         comments: 0,
         shares: 0,
         urgent: is_urgent,
+        rescue_status: initial_rescue_status.to_string(),
+        resolved_at: None,
         created_at: "agora".into(),
         contact,
         tags,
@@ -701,6 +705,8 @@ pub(crate) async fn load_post_by_id(
             p.comments_count,
             p.shares_count,
             p.urgent,
+            p.rescue_status,
+            p.resolved_at,
             p.created_at,
             p.contact,
             p.tags,
@@ -753,6 +759,10 @@ pub(crate) async fn load_post_by_id(
             comments: row.get::<i32, _>("comments_count").max(0) as u32,
             shares: row.get::<i32, _>("shares_count").max(0) as u32,
             urgent: row.get("urgent"),
+            rescue_status: row.get("rescue_status"),
+            resolved_at: row
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("resolved_at")
+                .map(|value| value.to_rfc3339()),
             created_at: row
                 .get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                 .to_rfc3339(),
