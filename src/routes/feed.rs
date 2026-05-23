@@ -208,16 +208,16 @@ pub(crate) async fn load_db_posts(
     };
 
     let rows = sqlx::query(sql)
-    .bind(post_type)
-    .bind(author_type)
-    .bind(query.urgent)
-    .bind(query.before)
-    .bind(query.lat)
-    .bind(query.lng)
-    .bind(radius)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await?;
+        .bind(post_type)
+        .bind(author_type)
+        .bind(query.urgent)
+        .bind(query.before)
+        .bind(query.lat)
+        .bind(query.lng)
+        .bind(radius)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?;
 
     Ok(rows
         .into_iter()
