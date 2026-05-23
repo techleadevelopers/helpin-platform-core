@@ -35,6 +35,7 @@ pub struct Config {
     pub payment_provider: String,
     pub payment_webhook_secret: Option<String>,
     pub sentry_dsn: Option<String>,
+    pub otel_exporter_otlp_endpoint: Option<String>,
     pub push_worker_enabled: bool,
     pub push_provider: String,
 }
@@ -120,6 +121,9 @@ impl Config {
             payment_provider: env::var("PAYMENT_PROVIDER").unwrap_or_else(|_| "disabled".to_string()),
             payment_webhook_secret: env::var("PAYMENT_WEBHOOK_SECRET").ok(),
             sentry_dsn: env::var("SENTRY_DSN").ok(),
+            otel_exporter_otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             push_worker_enabled: env::var("PUSH_WORKER_ENABLED")
                 .ok()
                 .map(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
