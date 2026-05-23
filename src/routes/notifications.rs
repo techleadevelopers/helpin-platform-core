@@ -13,7 +13,7 @@ use crate::{
     routes::{auth::authenticate_request, posts::load_post_by_id},
     services::notifications::{
         dispatch_persistent_rescue_alert, upsert_persistent_subscription, PushPlatform,
-        PushSubscription, RescueAlert,
+        PushSubscription, RescueAlert, MIN_RESCUE_ALERT_RADIUS_KM,
     },
     state::AppState,
 };
@@ -142,7 +142,10 @@ pub async fn register_push_token(
         platform: payload.platform,
         lat: payload.lat,
         lng: payload.lng,
-        radius_km: payload.radius_km.unwrap_or(8.0).clamp(1.0, 50.0),
+        radius_km: payload
+            .radius_km
+            .unwrap_or(8.0)
+            .clamp(MIN_RESCUE_ALERT_RADIUS_KM, 50.0),
         critical_alerts: payload.critical_alerts.unwrap_or(false),
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
