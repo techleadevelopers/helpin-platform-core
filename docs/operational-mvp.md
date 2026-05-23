@@ -29,7 +29,8 @@ vulnerable animal
 The push layer must behave like targeted emergency fanout, not generic social engagement. The right behavior is:
 
 - send fast after the rescue post is committed
-- prefer nearby subscribers over broad broadcast
+- prefer very nearby subscribers over broad broadcast
+- use a phase-1 urgent rescue radius of `30 m`
 - respect each subscriber's configured radius
 - use critical-alert opt-in for urgent/emergency delivery
 - deduplicate by rescue case
@@ -37,6 +38,27 @@ The push layer must behave like targeted emergency fanout, not generic social en
 - measure delivery queue age, failures, and response time
 
 This turns geolocation and notification delivery into the core operating system for local animal rescue.
+
+## User Experience Flow
+
+The emergency UX should stay minimal and operational:
+
+1. Primary feed action: `Acionar resgate agora`.
+2. Compose asks only for the essentials: photo, short description, GPS, and urgency.
+3. Backend creates the post and dispatches the targeted rescue alert.
+4. The reporter lands on rescue status, not back on the generic feed.
+5. Recipients open the notification directly into the rescue case.
+6. The rescue case exposes two immediate actions: route and chat.
+7. The case ends with a clear outcome: resolved, transferred, monitored, or failed.
+
+The interface should avoid explaining the system while the user is under stress. The screen should answer only:
+
+- where is the animal?
+- what happened?
+- who is responding?
+- how do I get there?
+- where do I coordinate?
+- what is the current status?
 
 ## Current Trust Direction
 
