@@ -110,6 +110,8 @@ pub(crate) async fn load_db_posts(
             p.comments_count,
             p.shares_count,
             p.urgent,
+            p.rescue_status,
+            p.resolved_at,
             p.created_at,
             p.contact,
             p.tags,
@@ -139,7 +141,7 @@ pub(crate) async fn load_db_posts(
             )
           )
         ORDER BY
-          CASE WHEN p.urgent THEN 1 ELSE 0 END DESC,
+          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1 ELSE 0 END DESC,
           p.created_at DESC
         LIMIT $8
         "#
@@ -167,6 +169,8 @@ pub(crate) async fn load_db_posts(
             p.comments_count,
             p.shares_count,
             p.urgent,
+            p.rescue_status,
+            p.resolved_at,
             p.created_at,
             p.contact,
             p.tags,
@@ -197,7 +201,7 @@ pub(crate) async fn load_db_posts(
             )
           )
         ORDER BY
-          CASE WHEN p.urgent THEN 1 ELSE 0 END DESC,
+          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1 ELSE 0 END DESC,
           CASE
             WHEN $5::double precision IS NULL OR $6::double precision IS NULL THEN 0
             ELSE ((p.latitude - $5) * (p.latitude - $5)) + ((p.longitude - $6) * (p.longitude - $6))
@@ -251,6 +255,10 @@ pub(crate) async fn load_db_posts(
                 comments: row.get::<i32, _>("comments_count").max(0) as u32,
                 shares: row.get::<i32, _>("shares_count").max(0) as u32,
                 urgent: row.get("urgent"),
+                rescue_status: row.get("rescue_status"),
+                resolved_at: row
+                    .get::<Option<DateTime<Utc>>, _>("resolved_at")
+                    .map(|value| value.to_rfc3339()),
                 created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
                 contact: row.get("contact"),
                 tags: row.get("tags"),
@@ -272,7 +280,11 @@ fn account_type_as_str(value: &AccountType) -> &'static str {
 
 #[cfg(test)]
 fn feed_score(post: &Post, distance_km: Option<f64>) -> f64 {
-    let urgency = if post.urgent { 1000.0 } else { 0.0 };
+    let urgency = if post.urgent && post.rescue_status != "resolved" {
+        1000.0
+    } else {
+        0.0
+    };
     let kind_weight = match post.post_type {
         PostType::Emergency => 500.0,
         PostType::Lost => 350.0,
