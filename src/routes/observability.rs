@@ -241,8 +241,11 @@ async fn build_status(state: &AppState) -> ObservabilityStatus {
         )
         .await,
     };
-    let active_rescue_sessions =
-        count_scalar(state, "SELECT count(*) FROM rescue_sessions WHERE status = 'active'").await;
+    let active_rescue_sessions = count_scalar(
+        state,
+        "SELECT count(*) FROM rescue_sessions WHERE status = 'active'",
+    )
+    .await;
     let active_chat_rooms = count_scalar(state, "SELECT count(*) FROM chat_rooms").await;
     let status = if db.status == "up" && queue.dead_letter_push_jobs == 0 {
         "ok"
