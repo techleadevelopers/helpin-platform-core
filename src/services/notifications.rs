@@ -12,6 +12,9 @@ use crate::{domain::Post, services::geo::haversine_km};
 
 #[cfg(test)]
 const MAX_RECENT_ALERTS: usize = 200;
+const EARTH_KM_PER_DEGREE: f64 = 111.0;
+const ACTIVE_SUBSCRIPTION_MAX_AGE_DAYS: i64 = 30;
+const MAX_RESCUE_ALERT_RECIPIENTS: usize = 250;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -231,13 +234,24 @@ pub async fn dispatch_persistent_rescue_alert(
         post.name, post.neighborhood
     );
 
+    let lat_delta = radius_km / EARTH_KM_PER_DEGREE;
+    let lng_delta = longitude_delta_for_radius(post.latitude, radius_km);
     let rows = sqlx::query(
         r#"
-        SELECT user_id, push_token, platform, lat, lng, radius_km
+        SELECT user_id, push_token, platform, lat, lng, radius_km, critical_alerts
         FROM push_subscriptions
-        WHERE updated_at > now() - interval '90 days'
+        WHERE updated_at > now() - ($1::int * interval '1 day')
+          AND lat BETWEEN $2 AND $3
+          AND lng BETWEEN $4 AND $5
+          AND ($6::boolean = false OR critical_alerts = true)
         "#,
     )
+    .bind(ACTIVE_SUBSCRIPTION_MAX_AGE_DAYS as i32)
+    .bind(post.latitude - lat_delta)
+    .bind(post.latitude + lat_delta)
+    .bind(post.longitude - lng_delta)
+    .bind(post.longitude + lng_delta)
+    .bind(post.urgent)
     .fetch_all(db)
     .await?;
 
@@ -262,6 +276,7 @@ pub async fn dispatch_persistent_rescue_alert(
         })
         .collect();
     recipients.sort_by(|a, b| a.distance_km.total_cmp(&b.distance_km));
+    recipients.truncate(MAX_RESCUE_ALERT_RECIPIENTS);
 
     let alert = RescueAlert {
         id: Uuid::now_v7().to_string(),
@@ -374,6 +389,11 @@ pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<()
     Ok(())
 }
 
+fn longitude_delta_for_radius(lat: f64, radius_km: f64) -> f64 {
+    let latitude_factor = lat.to_radians().cos().abs().max(0.01);
+    radius_km / (EARTH_KM_PER_DEGREE * latitude_factor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +433,15 @@ mod tests {
         assert_eq!(alert.recipients.len(), 1);
         assert_eq!(alert.recipients[0].user_id, "near");
         assert!(alert.critical);
+    }
+
+    #[test]
+    fn longitude_delta_handles_equator_and_poles() {
+        let equator_delta = longitude_delta_for_radius(0.0, 8.0);
+        let polar_delta = longitude_delta_for_radius(89.9, 8.0);
+
+        assert!(equator_delta > 0.07);
+        assert!(polar_delta > equator_delta);
+        assert!(polar_delta.is_finite());
     }
 }
