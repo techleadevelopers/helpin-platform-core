@@ -3,11 +3,12 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    state::{ChatEvent, RescueEvent},
+    state::{ChatEvent, FeedEvent, RescueEvent},
 };
 
 pub const CHAT_MESSAGES_SUBJECT: &str = "zoohelp.chat.messages";
 pub const RESCUE_EVENTS_SUBJECT: &str = "zoohelp.rescue.events";
+pub const FEED_EVENTS_SUBJECT: &str = "zoohelp.feed.events";
 
 #[derive(Clone)]
 pub struct EventBus {
@@ -62,10 +63,15 @@ impl EventBus {
         self.publish(RESCUE_EVENTS_SUBJECT, event).await;
     }
 
+    pub async fn publish_feed(&self, event: &FeedEvent) {
+        self.publish(FEED_EVENTS_SUBJECT, event).await;
+    }
+
     pub fn spawn_bridge(
         &self,
         chat_tx: tokio::sync::broadcast::Sender<ChatEvent>,
         rescue_tx: tokio::sync::broadcast::Sender<RescueEvent>,
+        feed_tx: tokio::sync::broadcast::Sender<FeedEvent>,
     ) {
         let Some(client) = self.client.clone() else {
             return;
@@ -80,11 +86,19 @@ impl EventBus {
             },
         );
         spawn_subscription(
-            client,
+            client.clone(),
             self.origin_id.clone(),
             RESCUE_EVENTS_SUBJECT,
             move |event| {
                 let _ = rescue_tx.send(event);
+            },
+        );
+        spawn_subscription(
+            client,
+            self.origin_id.clone(),
+            FEED_EVENTS_SUBJECT,
+            move |event| {
+                let _ = feed_tx.send(event);
             },
         );
     }
