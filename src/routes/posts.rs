@@ -1,3 +1,5 @@
+use std::time::Duration as StdDuration;
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -13,7 +15,7 @@ use crate::{
     error::ApiError,
     routes::auth::audit_event,
     services::notifications::{dispatch_persistent_rescue_alert, RescueAlert},
-    services::{auth as auth_service, fraud},
+    services::{auth as auth_service, fraud, rate_limit},
     state::AppState,
 };
 
@@ -210,6 +212,13 @@ pub async fn create_post(
 
     let claims = authenticate_request(&state, &headers)?;
     let author_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:create:{author_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
