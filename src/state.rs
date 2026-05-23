@@ -21,6 +21,7 @@ pub struct AppState {
     pub started_at: DateTime<Utc>,
     pub chat_tx: broadcast::Sender<ChatEvent>,
     pub rescue_tx: broadcast::Sender<RescueEvent>,
+    pub feed_tx: broadcast::Sender<FeedEvent>,
     pub email: EmailService,
     pub event_bus: EventBus,
     pub redis: Option<redis::Client>,
@@ -38,9 +39,10 @@ impl AppState {
 
         let (chat_tx, _) = broadcast::channel(1024);
         let (rescue_tx, _) = broadcast::channel(4096);
+        let (feed_tx, _) = broadcast::channel(4096);
         let email = EmailService::new(config.clone());
         let event_bus = EventBus::connect(&config).await?;
-        event_bus.spawn_bridge(chat_tx.clone(), rescue_tx.clone());
+        event_bus.spawn_bridge(chat_tx.clone(), rescue_tx.clone(), feed_tx.clone());
         let redis = if config.app_env == "test" {
             None
         } else {
@@ -54,6 +56,7 @@ impl AppState {
             started_at: Utc::now(),
             chat_tx,
             rescue_tx,
+            feed_tx,
             email,
             event_bus,
             redis,
@@ -261,7 +264,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         r#"
         CREATE TABLE IF NOT EXISTS rescue_sessions (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          post_id text NOT NULL,
+          post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
           reporter_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
           status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'ended')),
           lat double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
@@ -396,4 +399,16 @@ pub struct RescueEvent {
     pub lng: f64,
     pub accuracy: Option<f64>,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedEvent {
+    pub post_id: String,
+    pub post_type: String,
+    pub urgent: bool,
+    pub rescue_status: String,
+    pub lat: f64,
+    pub lng: f64,
+    pub created_at: String,
 }
