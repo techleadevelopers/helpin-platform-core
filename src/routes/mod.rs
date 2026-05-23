@@ -72,7 +72,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/reports/posts", get(admin::list_post_reports))
         .route("/v1/me", get(auth::me).delete(auth::delete_account))
         .route("/v1/me/avatar", patch(auth::update_avatar))
+        .route(
+            "/v1/me/ong/kyb-documents",
+            post(admin::create_my_kyb_document),
+        )
         .route("/v1/feed", get(feed::list_feed))
+        .route("/v1/feed/ws", get(feed::feed_ws))
         .route("/v1/posts", post(posts::create_post))
         .route("/v1/posts/:id", get(posts::get_post))
         .route("/v1/posts/:id/like", post(posts::toggle_like))
