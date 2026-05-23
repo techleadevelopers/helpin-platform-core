@@ -53,6 +53,8 @@ pub struct RescueAlert {
     pub radius_km: f64,
     pub critical: bool,
     pub actions: Vec<NotificationAction>,
+    pub recipient_count: usize,
+    #[serde(skip_serializing)]
     pub recipients: Vec<AlertRecipient>,
     pub created_at: String,
 }
@@ -61,6 +63,7 @@ pub struct RescueAlert {
 #[serde(rename_all = "camelCase")]
 pub struct AlertRecipient {
     pub user_id: String,
+    #[serde(skip_serializing)]
     pub push_token: String,
     pub platform: PushPlatform,
     pub distance_km: f64,
@@ -127,6 +130,7 @@ impl NotificationEngine {
                     deep_link: format!("zoohelp://post/{}?action=chat", post.id),
                 },
             ],
+            recipient_count: recipients.len(),
             recipients,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -330,6 +334,7 @@ async fn build_persistent_rescue_alert(
                 deep_link: format!("zoohelp://post/{}?action=chat", post.id),
             },
         ],
+        recipient_count: recipients.len(),
         recipients,
         created_at: chrono::Utc::now().to_rfc3339(),
     })
@@ -383,7 +388,6 @@ pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<()
         .bind(format!("rescue:{}", alert.post_id))
         .bind(serde_json::json!({
             "alertId": alert.id,
-            "pushToken": recipient.push_token,
             "platform": push_platform_as_str(&recipient.platform),
             "deliveryStatus": recipient.delivery_status,
             "radiusKm": alert.radius_km
