@@ -13,7 +13,7 @@ use crate::{domain::Post, services::geo::haversine_km};
 #[cfg(test)]
 const MAX_RECENT_ALERTS: usize = 200;
 const EARTH_KM_PER_DEGREE: f64 = 111.0;
-const ACTIVE_SUBSCRIPTION_MAX_AGE_DAYS: i64 = 30;
+const ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES: i64 = 15;
 const MAX_RESCUE_ALERT_RECIPIENTS: usize = 250;
 pub const MIN_RESCUE_ALERT_RADIUS_KM: f64 = 0.03;
 pub const URGENT_RESCUE_ALERT_RADIUS_KM: f64 = 0.03;
@@ -235,6 +235,24 @@ pub async fn dispatch_persistent_rescue_alert(
     post: &Post,
     default_radius_km: f64,
 ) -> Result<RescueAlert, sqlx::Error> {
+    let alert = build_persistent_rescue_alert(db, post, default_radius_km).await?;
+    persist_rescue_alert(db, &alert).await?;
+    Ok(alert)
+}
+
+pub async fn preview_persistent_rescue_alert(
+    db: &PgPool,
+    post: &Post,
+    default_radius_km: f64,
+) -> Result<RescueAlert, sqlx::Error> {
+    build_persistent_rescue_alert(db, post, default_radius_km).await
+}
+
+async fn build_persistent_rescue_alert(
+    db: &PgPool,
+    post: &Post,
+    default_radius_km: f64,
+) -> Result<RescueAlert, sqlx::Error> {
     let radius_km = alert_radius_km(post.urgent, default_radius_km);
     let title = if post.urgent {
         "Resgate urgente perto de voce".to_string()
@@ -252,13 +270,13 @@ pub async fn dispatch_persistent_rescue_alert(
         r#"
         SELECT user_id, push_token, platform, lat, lng, radius_km, critical_alerts
         FROM push_subscriptions
-        WHERE updated_at > now() - ($1::int * interval '1 day')
+        WHERE updated_at > now() - ($1::int * interval '1 minute')
           AND lat BETWEEN $2 AND $3
           AND lng BETWEEN $4 AND $5
           AND ($6::boolean = false OR critical_alerts = true)
         "#,
     )
-    .bind(ACTIVE_SUBSCRIPTION_MAX_AGE_DAYS as i32)
+    .bind(ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES as i32)
     .bind(post.latitude - lat_delta)
     .bind(post.latitude + lat_delta)
     .bind(post.longitude - lng_delta)
@@ -290,7 +308,7 @@ pub async fn dispatch_persistent_rescue_alert(
     recipients.sort_by(|a, b| a.distance_km.total_cmp(&b.distance_km));
     recipients.truncate(MAX_RESCUE_ALERT_RECIPIENTS);
 
-    let alert = RescueAlert {
+    Ok(RescueAlert {
         id: Uuid::now_v7().to_string(),
         post_id: post.id.clone(),
         title,
@@ -314,10 +332,7 @@ pub async fn dispatch_persistent_rescue_alert(
         ],
         recipients,
         created_at: chrono::Utc::now().to_rfc3339(),
-    };
-
-    persist_rescue_alert(db, &alert).await?;
-    Ok(alert)
+    })
 }
 
 pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<(), sqlx::Error> {
@@ -346,13 +361,14 @@ pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<()
 
     for recipient in &alert.recipients {
         let user_id = Uuid::parse_str(&recipient.user_id).ok();
-        let event_id: Uuid = sqlx::query_scalar(
+        let event_id: Option<Uuid> = sqlx::query_scalar(
             r#"
             INSERT INTO notification_events (
               user_id, kind, title, body, post_id, image_url, distance_km, critical,
               deeplink, dedupe_key, ttl_seconds, category, payload
             )
             VALUES ($1, 'rescue_alert', $2, $3, $4, $5, $6, $7, $8, $9, 900, 'rescue', $10)
+            ON CONFLICT DO NOTHING
             RETURNING id
             "#,
         )
@@ -372,8 +388,12 @@ pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<()
             "deliveryStatus": recipient.delivery_status,
             "radiusKm": alert.radius_km
         }))
-        .fetch_one(db)
+        .fetch_optional(db)
         .await?;
+
+        let Some(event_id) = event_id else {
+            continue;
+        };
 
         sqlx::query(
             r#"
