@@ -50,11 +50,7 @@ pub async fn list_rooms(
     Query(query): Query<ListRoomsQuery>,
 ) -> Result<Json<Vec<ChatConversation>>, ApiError> {
     authenticate_request(&state, &headers)?;
-    let post_id = query
-        .post_id
-        .as_deref()
-        .map(parse_uuid)
-        .transpose()?;
+    let post_id = query.post_id.as_deref().map(parse_uuid).transpose()?;
 
     let rows = sqlx::query(
         r#"
