@@ -2,6 +2,9 @@
 
 use anyhow::Context;
 use axum::http::{HeaderValue, Method};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{trace::SdkTracerProvider, Resource};
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -23,12 +26,8 @@ use state::AppState;
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer().json())
-        .init();
-
     let config = Config::from_env()?;
+    let _otel_provider = init_tracing(&config)?;
     let state = AppState::new(config.clone()).await?;
 
     let app = routes::router(state)
@@ -41,6 +40,39 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn init_tracing(config: &Config) -> anyhow::Result<Option<SdkTracerProvider>> {
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env();
+    let fmt_layer = tracing_subscriber::fmt::layer().json();
+
+    if let Some(endpoint) = config.otel_exporter_otlp_endpoint.as_deref() {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint.to_string())
+            .build()
+            .context("failed to build OTLP trace exporter")?;
+        let provider = SdkTracerProvider::builder()
+            .with_resource(Resource::builder().with_service_name("zoohelp-backend").build())
+            .with_batch_exporter(exporter)
+            .build();
+        let tracer = provider.tracer("zoohelp-backend");
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .init();
+
+        Ok(Some(provider))
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+
+        Ok(None)
+    }
 }
 
 fn cors_layer(config: &Config) -> anyhow::Result<CorsLayer> {
