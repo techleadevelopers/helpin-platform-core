@@ -150,6 +150,19 @@ pub async fn trigger(
 
     let rescue = row_to_rescue(row);
     insert_location_point(&mut tx, &rescue.id, rescue.lat, rescue.lng, rescue.accuracy).await?;
+    if let Ok(post_id) = Uuid::parse_str(&rescue.post_id) {
+        sqlx::query(
+            r#"
+            UPDATE posts
+            SET rescue_status = 'active',
+                resolved_at = NULL
+            WHERE id = $1
+            "#,
+        )
+        .bind(post_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     broadcast_rescue_event(&state, &rescue);
@@ -202,6 +215,7 @@ pub async fn end(
     Path(id): Path<Uuid>,
 ) -> Result<Json<RescueResponse>, ApiError> {
     authenticate_user(&state, &headers, None)?;
+    let mut tx = state.db.begin().await?;
     let row = sqlx::query(
         r#"
         UPDATE rescue_sessions
@@ -213,11 +227,25 @@ pub async fn end(
         "#,
     )
     .bind(id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(ApiError::NotFound)?;
 
     let rescue = row_to_rescue(row);
+    if let Ok(post_id) = Uuid::parse_str(&rescue.post_id) {
+        sqlx::query(
+            r#"
+            UPDATE posts
+            SET rescue_status = 'resolved',
+                resolved_at = COALESCE(resolved_at, now())
+            WHERE id = $1
+            "#,
+        )
+        .bind(post_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     broadcast_rescue_event(&state, &rescue);
     Ok(Json(RescueResponse { rescue }))
 }
