@@ -140,8 +140,8 @@ pub async fn login(
     rate_limit::check_key(
         &state,
         &format!("auth:login:{}", payload.email),
-        10,
-        StdDuration::from_secs(60),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
     )
     .await?;
 
@@ -199,8 +199,8 @@ pub async fn register(
     rate_limit::check_key(
         &state,
         &format!("auth:register:{}", payload.email),
-        5,
-        StdDuration::from_secs(300),
+        state.config.throttle_limit.max(2) / 2,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds * 5),
     )
     .await?;
 
