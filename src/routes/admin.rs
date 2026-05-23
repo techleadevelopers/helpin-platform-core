@@ -1,3 +1,5 @@
+use std::time::Duration as StdDuration;
+
 use axum::{
     extract::{Path, State},
     http::{header::AUTHORIZATION, HeaderMap},
@@ -9,7 +11,10 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    domain::AccountType, error::ApiError, services::auth as auth_service, state::AppState,
+    domain::AccountType,
+    error::ApiError,
+    services::{auth as auth_service, rate_limit},
+    state::AppState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -448,6 +453,54 @@ pub async fn create_kyb_document(
     Ok(Json(row_to_kyb_document(row)))
 }
 
+pub async fn create_my_kyb_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateKybDocumentRequest>,
+) -> Result<Json<KybDocument>, ApiError> {
+    let claims = authenticate_any(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    if !matches!(claims.account_type, AccountType::Ong | AccountType::Admin) {
+        return Err(ApiError::Forbidden);
+    }
+    rate_limit::check_key(
+        &state,
+        &format!("kyb:create:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds * 5),
+    )
+    .await?;
+
+    let ong_id: Uuid = sqlx::query_scalar("SELECT id FROM ong_profiles WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::Forbidden)?;
+    let document_type = normalize_document_type(payload.document_type.trim())?;
+    if payload.object_key.trim().is_empty() || payload.public_url.trim().is_empty() {
+        return Err(ApiError::Validation(
+            "objectKey and publicUrl are required".into(),
+        ));
+    }
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO ong_kyb_documents (ong_id, document_type, object_key, public_url)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, ong_id, document_type, object_key, public_url, status,
+                  reviewer_user_id, rejection_reason, created_at, reviewed_at
+        "#,
+    )
+    .bind(ong_id)
+    .bind(document_type)
+    .bind(payload.object_key.trim())
+    .bind(payload.public_url.trim())
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(row_to_kyb_document(row)))
+}
+
 pub async fn review_kyb_document(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -476,6 +529,11 @@ pub async fn review_kyb_document(
     .fetch_optional(&state.db)
     .await?
     .ok_or(ApiError::NotFound)?;
+
+    let ong_id: Uuid = row.get("ong_id");
+    if status == "approved" {
+        maybe_auto_approve_ong_from_kyb(&state, ong_id, reviewer_id).await?;
+    }
 
     Ok(Json(row_to_kyb_document(row)))
 }
@@ -596,6 +654,85 @@ fn normalize_review_status(value: &str) -> Result<&'static str, ApiError> {
         "rejected" => Ok("rejected"),
         _ => Err(ApiError::Validation("invalid review status".into())),
     }
+}
+
+fn normalize_document_type(value: &str) -> Result<&'static str, ApiError> {
+    match value {
+        "document_front" | "rg_front" | "id_front" => Ok("document_front"),
+        "document_back" | "rg_back" | "id_back" => Ok("document_back"),
+        "selfie_with_document" | "selfie_rg" | "selfie" => Ok("selfie_with_document"),
+        "address_proof" | "proof_of_address" => Ok("address_proof"),
+        _ => Err(ApiError::Validation("invalid documentType".into())),
+    }
+}
+
+async fn maybe_auto_approve_ong_from_kyb(
+    state: &AppState,
+    ong_id: Uuid,
+    reviewer_id: Uuid,
+) -> Result<(), ApiError> {
+    let approved_required_docs: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(DISTINCT document_type)
+        FROM ong_kyb_documents
+        WHERE ong_id = $1
+          AND status = 'approved'
+          AND document_type IN ('document_front', 'document_back', 'selfie_with_document')
+        "#,
+    )
+    .bind(ong_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if approved_required_docs < 3 {
+        return Ok(());
+    }
+
+    let mut tx = state.db.begin().await?;
+    let user_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        UPDATE ong_profiles
+        SET verification_status = 'APPROVED',
+            verification_reviewed_at = COALESCE(verification_reviewed_at, now()),
+            verification_reviewer_user_id = $2,
+            verification_rejection_reason = NULL,
+            verified_at = COALESCE(verified_at, now()),
+            updated_at = now()
+        WHERE id = $1
+        RETURNING user_id
+        "#,
+    )
+    .bind(ong_id)
+    .bind(reviewer_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(user_id) = user_id {
+        sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+fn authenticate_any(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<auth_service::AccessClaims, ApiError> {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })
+        .ok_or(ApiError::Unauthorized)?;
+
+    auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
 }
 
 fn normalize_moderation_status(value: &str) -> Result<&'static str, ApiError> {
