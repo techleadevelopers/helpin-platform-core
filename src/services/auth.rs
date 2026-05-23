@@ -136,6 +136,7 @@ mod tests {
             payment_provider: "test".into(),
             payment_webhook_secret: Some("test-webhook-secret-123456".into()),
             sentry_dsn: None,
+            otel_exporter_otlp_endpoint: None,
             push_worker_enabled: false,
             push_provider: "expo".into(),
         };
