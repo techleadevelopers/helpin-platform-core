@@ -5,16 +5,19 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
+    domain::AccountType,
     error::ApiError,
     routes::{auth::authenticate_request, posts::load_post_by_id},
     services::notifications::{
         preview_persistent_rescue_alert, upsert_persistent_subscription, PushPlatform,
         PushSubscription, RescueAlert, MIN_RESCUE_ALERT_RADIUS_KM,
     },
+    services::rate_limit,
     state::AppState,
 };
 
@@ -78,6 +81,13 @@ pub async fn list_notifications(
 ) -> Result<Json<Vec<NotificationItem>>, ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("notifications:push-token:{user_id}"),
+        state.config.throttle_limit * 3,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
 
     let rows = sqlx::query(
         r#"
@@ -165,11 +175,22 @@ pub async fn preview_rescue_alert(
     State(state): State<AppState>,
     Path(post_id): Path<String>,
 ) -> Result<Json<AlertDispatchResponse>, ApiError> {
-    authenticate_request(&state, &headers)?;
+    let claims = authenticate_request(&state, &headers)?;
+    let requester_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("notifications:preview:{requester_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let post_id = Uuid::parse_str(&post_id).map_err(|_| ApiError::NotFound)?;
     let post = load_post_by_id(&state, post_id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if post.author.id != claims.sub && !matches!(claims.account_type, AccountType::Admin) {
+        return Err(ApiError::Forbidden);
+    }
     let alert = preview_persistent_rescue_alert(&state.db, &post, 5.0).await?;
     Ok(Json(AlertDispatchResponse { alert }))
 }
