@@ -203,6 +203,7 @@ fn media_kind(content_type: &str) -> Option<&'static str> {
 fn upload_purpose(purpose: Option<&str>) -> &'static str {
     match purpose {
         Some("ong-logo") => "ong-logos",
+        Some("kyb-document") => "kyb-documents",
         Some("profile-avatar") => "profile-avatars",
         _ => "posts",
     }
