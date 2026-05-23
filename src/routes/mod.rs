@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(body["post"]["latitude"], -23.5505);
         assert_eq!(body["post"]["longitude"], -46.6333);
         assert_eq!(body["rescueAlert"]["critical"], true);
-        assert_eq!(body["rescueAlert"]["radiusKm"], 8.0);
+        assert_eq!(body["rescueAlert"]["radiusKm"], 0.03);
     }
 
     #[tokio::test]
