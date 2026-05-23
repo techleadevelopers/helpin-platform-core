@@ -20,6 +20,8 @@ ZooHelp is not only an adoption app. The backend is being shaped as a real-time 
 
 ZooHelp Hybrid Core provides the backend runtime for a modern animal rescue network.
 
+The operational MVP is documented in [`docs/operational-mvp.md`](docs/operational-mvp.md). It keeps the first scope focused on verified NGOs, manual trust review, real rescue coordination, and measurable rescue outcomes before expanding into heavier AI or automation layers.
+
 The platform is intended to support cases such as:
 
 - a person finds an injured animal and posts an urgent request
@@ -431,6 +433,15 @@ Production reliability targets:
 - Sentry or equivalent error aggregation
 - Prometheus dashboards for API, queue, push, and websocket metrics
 - alerting for notification delay, failed uploads, auth failures, and WebSocket disconnect spikes
+
+Production readiness gate:
+
+- [`docs/production-readiness.md`](docs/production-readiness.md)
+- persistence completeness
+- durable notifications
+- queue guarantees
+- retries and DLQ
+- staging evidence before public scale claims
 
 ## Environment Variables
 
