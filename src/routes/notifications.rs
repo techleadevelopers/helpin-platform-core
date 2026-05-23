@@ -12,7 +12,7 @@ use crate::{
     error::ApiError,
     routes::{auth::authenticate_request, posts::load_post_by_id},
     services::notifications::{
-        dispatch_persistent_rescue_alert, upsert_persistent_subscription, PushPlatform,
+        preview_persistent_rescue_alert, upsert_persistent_subscription, PushPlatform,
         PushSubscription, RescueAlert, MIN_RESCUE_ALERT_RADIUS_KM,
     },
     state::AppState,
@@ -170,7 +170,7 @@ pub async fn preview_rescue_alert(
     let post = load_post_by_id(&state, post_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let alert = dispatch_persistent_rescue_alert(&state.db, &post, 5.0).await?;
+    let alert = preview_persistent_rescue_alert(&state.db, &post, 5.0).await?;
     Ok(Json(AlertDispatchResponse { alert }))
 }
 
