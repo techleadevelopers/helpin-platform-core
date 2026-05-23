@@ -70,8 +70,8 @@ pub async fn create_upload_intent(
     rate_limit::check_key(
         &state,
         &format!("media:upload-intent:{user_id}"),
-        30,
-        StdDuration::from_secs(60),
+        state.config.throttle_limit * 3,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
     )
     .await?;
 
