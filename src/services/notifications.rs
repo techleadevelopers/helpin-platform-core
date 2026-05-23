@@ -15,6 +15,8 @@ const MAX_RECENT_ALERTS: usize = 200;
 const EARTH_KM_PER_DEGREE: f64 = 111.0;
 const ACTIVE_SUBSCRIPTION_MAX_AGE_DAYS: i64 = 30;
 const MAX_RESCUE_ALERT_RECIPIENTS: usize = 250;
+pub const MIN_RESCUE_ALERT_RADIUS_KM: f64 = 0.03;
+pub const URGENT_RESCUE_ALERT_RADIUS_KM: f64 = 0.03;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -91,8 +93,9 @@ impl NotificationEngine {
 
     #[cfg(test)]
     pub fn dispatch_rescue_alert(&self, post: &Post, default_radius_km: f64) -> RescueAlert {
-        let radius_km = if post.urgent { 8.0 } else { default_radius_km }.clamp(1.0, 50.0);
-        let recipients = self.nearby_recipients(post.latitude, post.longitude, radius_km);
+        let radius_km = alert_radius_km(post.urgent, default_radius_km);
+        let recipients =
+            self.nearby_recipients(post.latitude, post.longitude, radius_km, post.urgent);
         let title = if post.urgent {
             "Resgate urgente perto de voce".to_string()
         } else {
@@ -132,18 +135,27 @@ impl NotificationEngine {
     }
 
     #[cfg(test)]
-    fn nearby_recipients(&self, lat: f64, lng: f64, radius_km: f64) -> Vec<AlertRecipient> {
+    fn nearby_recipients(
+        &self,
+        lat: f64,
+        lng: f64,
+        radius_km: f64,
+        critical: bool,
+    ) -> Vec<AlertRecipient> {
         let subscriptions = self.subscriptions.lock().expect("notification lock");
         let mut recipients: Vec<_> = subscriptions
             .values()
             .filter_map(|subscription| {
+                if critical && !subscription.critical_alerts {
+                    return None;
+                }
                 let distance = haversine_km(lat, lng, subscription.lat, subscription.lng);
                 let effective_radius = radius_km.min(subscription.radius_km);
                 (distance <= effective_radius).then_some(AlertRecipient {
                     user_id: subscription.user_id.clone(),
                     push_token: subscription.push_token.clone(),
                     platform: subscription.platform.clone(),
-                    distance_km: (distance * 10.0).round() / 10.0,
+                    distance_km: round_distance_km(distance),
                     delivery_status: "queued",
                 })
             })
@@ -223,7 +235,7 @@ pub async fn dispatch_persistent_rescue_alert(
     post: &Post,
     default_radius_km: f64,
 ) -> Result<RescueAlert, sqlx::Error> {
-    let radius_km = if post.urgent { 8.0 } else { default_radius_km }.clamp(1.0, 50.0);
+    let radius_km = alert_radius_km(post.urgent, default_radius_km);
     let title = if post.urgent {
         "Resgate urgente perto de voce".to_string()
     } else {
@@ -270,7 +282,7 @@ pub async fn dispatch_persistent_rescue_alert(
                 user_id: row.get::<Uuid, _>("user_id").to_string(),
                 push_token: row.get("push_token"),
                 platform: push_platform_from_str(row.get::<&str, _>("platform")),
-                distance_km: (distance * 10.0).round() / 10.0,
+                distance_km: round_distance_km(distance),
                 delivery_status: "queued",
             })
         })
@@ -394,6 +406,18 @@ fn longitude_delta_for_radius(lat: f64, radius_km: f64) -> f64 {
     radius_km / (EARTH_KM_PER_DEGREE * latitude_factor)
 }
 
+fn alert_radius_km(urgent: bool, default_radius_km: f64) -> f64 {
+    if urgent {
+        URGENT_RESCUE_ALERT_RADIUS_KM
+    } else {
+        default_radius_km.clamp(MIN_RESCUE_ALERT_RADIUS_KM, 50.0)
+    }
+}
+
+fn round_distance_km(distance: f64) -> f64 {
+    (distance * 1000.0).round() / 1000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,45 +426,55 @@ mod tests {
     #[test]
     fn dispatches_only_to_nearby_subscribers() {
         let engine = NotificationEngine::default();
+        let post = seed_posts()
+            .into_iter()
+            .find(|post| post.urgent)
+            .expect("urgent seed post");
         engine.upsert_subscription(PushSubscription {
             user_id: "near".into(),
             push_token: "ExponentPushToken[near]".into(),
             platform: PushPlatform::Expo,
-            lat: -23.5506,
-            lng: -46.6334,
+            lat: post.latitude + 0.0001,
+            lng: post.longitude,
             radius_km: 10.0,
             critical_alerts: true,
+            updated_at: "now".into(),
+        });
+        engine.upsert_subscription(PushSubscription {
+            user_id: "near-without-critical-opt-in".into(),
+            push_token: "ExponentPushToken[near-without-critical-opt-in]".into(),
+            platform: PushPlatform::Expo,
+            lat: post.latitude + 0.0001,
+            lng: post.longitude,
+            radius_km: 10.0,
+            critical_alerts: false,
             updated_at: "now".into(),
         });
         engine.upsert_subscription(PushSubscription {
             user_id: "far".into(),
             push_token: "ExponentPushToken[far]".into(),
             platform: PushPlatform::Expo,
-            lat: -22.9068,
-            lng: -43.1729,
+            lat: post.latitude + 0.001,
+            lng: post.longitude,
             radius_km: 10.0,
             critical_alerts: true,
             updated_at: "now".into(),
         });
 
-        let post = seed_posts()
-            .into_iter()
-            .find(|post| post.urgent)
-            .expect("urgent seed post");
-
         let alert = engine.dispatch_rescue_alert(&post, 5.0);
 
         assert_eq!(alert.recipients.len(), 1);
         assert_eq!(alert.recipients[0].user_id, "near");
+        assert_eq!(alert.radius_km, URGENT_RESCUE_ALERT_RADIUS_KM);
         assert!(alert.critical);
     }
 
     #[test]
     fn longitude_delta_handles_equator_and_poles() {
-        let equator_delta = longitude_delta_for_radius(0.0, 8.0);
-        let polar_delta = longitude_delta_for_radius(89.9, 8.0);
+        let equator_delta = longitude_delta_for_radius(0.0, URGENT_RESCUE_ALERT_RADIUS_KM);
+        let polar_delta = longitude_delta_for_radius(89.9, URGENT_RESCUE_ALERT_RADIUS_KM);
 
-        assert!(equator_delta > 0.07);
+        assert!(equator_delta > 0.0002);
         assert!(polar_delta > equator_delta);
         assert!(polar_delta.is_finite());
     }
