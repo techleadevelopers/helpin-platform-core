@@ -186,6 +186,16 @@ pub struct CommentResponse {
     pub created_at: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostCommentResponse {
+    pub id: String,
+    pub post_id: String,
+    pub body: String,
+    pub created_at: String,
+    pub author: Author,
+}
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct ReportRequest {
     #[validate(length(min = 1, max = 120))]
@@ -641,6 +651,59 @@ pub async fn create_comment(
                 .to_rfc3339(),
         }),
     ))
+}
+
+pub async fn list_comments(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<PostCommentResponse>>, ApiError> {
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          c.id::text AS id,
+          c.post_id::text AS post_id,
+          c.body,
+          c.created_at,
+          u.id::text AS author_id,
+          u.name AS author_name,
+          u.avatar_url AS author_avatar,
+          u.verified AS author_verified,
+          u.account_type::text AS author_account_type
+        FROM post_comments c
+        JOIN users u ON u.id = c.user_id
+        WHERE c.post_id = $1
+          AND c.moderation_status <> 'rejected'
+        ORDER BY c.created_at ASC
+        LIMIT 50
+        "#,
+    )
+    .bind(post_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let comments = rows
+        .into_iter()
+        .map(|row| PostCommentResponse {
+            id: row.get("id"),
+            post_id: row.get("post_id"),
+            body: row.get("body"),
+            created_at: row
+                .get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .to_rfc3339(),
+            author: Author {
+                id: row.get("author_id"),
+                name: row.get("author_name"),
+                avatar: row.get("author_avatar"),
+                verified: row.get("author_verified"),
+                account_type: account_type_from_str(row.get::<&str, _>("author_account_type")),
+            },
+        })
+        .collect();
+
+    Ok(Json(comments))
 }
 
 pub async fn report_post(
