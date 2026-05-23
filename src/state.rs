@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::broadcast;
@@ -17,6 +18,7 @@ use crate::{
 pub struct AppState {
     pub config: Config,
     pub db: PgPool,
+    pub started_at: DateTime<Utc>,
     pub chat_tx: broadcast::Sender<ChatEvent>,
     pub rescue_tx: broadcast::Sender<RescueEvent>,
     pub email: EmailService,
@@ -49,6 +51,7 @@ impl AppState {
         Ok(Self {
             config,
             db,
+            started_at: Utc::now(),
             chat_tx,
             rescue_tx,
             email,
