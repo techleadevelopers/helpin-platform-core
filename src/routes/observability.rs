@@ -2,13 +2,15 @@ use std::{fs, time::Instant};
 
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::Serialize;
 
-use crate::state::AppState;
+use crate::{
+    domain::AccountType, error::ApiError, services::auth as auth_service, state::AppState,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,11 +144,19 @@ pub struct LatencyAverages {
     pub payment_latency: Option<f64>,
 }
 
-pub async fn status(State(state): State<AppState>) -> Json<ObservabilityStatus> {
-    Json(build_status(&state).await)
+pub async fn status(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<ObservabilityStatus>, ApiError> {
+    authenticate_observability(&state, &headers)?;
+    Ok(Json(build_status(&state).await))
 }
 
-pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn metrics(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    authenticate_observability(&state, &headers)?;
     let snapshot = build_status(&state).await;
     let db_up = if snapshot.db.status == "up" { 1 } else { 0 };
     let sentry_configured = if snapshot.sentry.configured { 1 } else { 0 };
@@ -212,11 +222,11 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         sentry_configured,
         otlp_configured,
     );
-    (
+    Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         body,
-    )
+    ))
 }
 
 async fn build_status(state: &AppState) -> ObservabilityStatus {
@@ -329,6 +339,24 @@ async fn build_status(state: &AppState) -> ObservabilityStatus {
         sentry_latency_ms: 0.0,
         timestamp: chrono::Utc::now().to_rfc3339(),
     }
+}
+
+fn authenticate_observability(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })
+        .ok_or(ApiError::Unauthorized)?;
+    let claims = auth_service::verify_access_token(&state.config, token)
+        .map_err(|_| ApiError::Unauthorized)?;
+    if !matches!(claims.account_type, AccountType::Admin) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(())
 }
 
 async fn database_health(state: &AppState) -> DbHealth {
