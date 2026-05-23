@@ -12,6 +12,32 @@ simple rescue report -> verified local network -> nearby response -> measured ou
 
 Trust is part of the infrastructure. Without it, the platform is exposed to fake NGOs, fraud, spam, emotional exploitation, and low-quality emergency reports.
 
+## Rapid Community Response
+
+The operational loop is intentionally direct:
+
+```text
+vulnerable animal
+-> user posts photo, description, urgency, and location
+-> backend validates geolocation and classifies emergency intent
+-> nearby NGOs, volunteers, and trusted community members are selected
+-> push notification is sent with high urgency and a deep link
+-> people coordinate through the post, map action, and chat
+-> the case receives an outcome
+```
+
+The push layer must behave like targeted emergency fanout, not generic social engagement. The right behavior is:
+
+- send fast after the rescue post is committed
+- prefer nearby subscribers over broad broadcast
+- respect each subscriber's configured radius
+- use critical-alert opt-in for urgent/emergency delivery
+- deduplicate by rescue case
+- include a direct deep link to route or chat
+- measure delivery queue age, failures, and response time
+
+This turns geolocation and notification delivery into the core operating system for local animal rescue.
+
 ## Current Trust Direction
 
 The platform already has the shape for a manual NGO verification workflow:
@@ -92,4 +118,3 @@ They are coherent future layers, but they should not block the first real rescue
 The product should stay free to use during validation. If the platform reaches meaningful scale, such as hundreds of thousands of users, a transparent maintenance contribution can be considered only to keep infrastructure, storage, notifications, observability, and moderation operations running.
 
 That contribution should be framed as infrastructure sustainability, not as charging people for emergency help.
-
