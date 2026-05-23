@@ -1,3 +1,5 @@
+use std::time::Duration as StdDuration;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -18,7 +20,7 @@ use crate::{
     domain::{AccountType, Author, ChatConversation, ChatMessage},
     error::ApiError,
     routes::auth::authenticate_request,
-    services::auth as auth_service,
+    services::{auth as auth_service, rate_limit},
     state::{AppState, ChatEvent},
 };
 
@@ -135,6 +137,13 @@ pub async fn send_message(
     let claims = authenticate_request(&state, &headers)?;
     let room_id = parse_uuid(&id)?;
     let sender_id = parse_claim_user_id(&claims)?;
+    rate_limit::check_key(
+        &state,
+        &format!("chat:message:{sender_id}"),
+        state.config.throttle_limit * 2,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     ensure_room_exists(&state, room_id).await?;
 
     let message = persist_chat_message(&state, room_id, sender_id, payload.body).await?;
@@ -170,6 +179,17 @@ async fn handle_socket(state: AppState, room_id: Uuid, sender_user_id: Uuid, soc
                     Some(Ok(Message::Text(text))) => {
                         let body = text.trim();
                         if body.is_empty() || body.len() > 2000 {
+                            continue;
+                        }
+                        if rate_limit::check_key(
+                            &state,
+                            &format!("chat:ws:{sender_user_id}"),
+                            state.config.throttle_limit * 2,
+                            StdDuration::from_secs(state.config.throttle_ttl_seconds),
+                        )
+                        .await
+                        .is_err()
+                        {
                             continue;
                         }
                         match persist_chat_message(&state, room_id, sender_user_id, body.to_string()).await {
