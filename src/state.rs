@@ -137,7 +137,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
           platform text NOT NULL CHECK (platform IN ('ios', 'android', 'expo', 'web')),
           lat double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
           lng double precision NOT NULL CHECK (lng BETWEEN -180 AND 180),
-          radius_km double precision NOT NULL DEFAULT 8 CHECK (radius_km BETWEEN 1 AND 50),
+          radius_km double precision NOT NULL DEFAULT 8 CHECK (radius_km BETWEEN 0.03 AND 50),
           critical_alerts boolean NOT NULL DEFAULT false,
           updated_at timestamptz NOT NULL DEFAULT now(),
           created_at timestamptz NOT NULL DEFAULT now()
