@@ -140,6 +140,8 @@ mod tests {
             push_worker_enabled: false,
             push_provider: "expo".into(),
             expo_access_token: None,
+            throttle_ttl_seconds: 60,
+            throttle_limit: 10,
         };
 
         let token =
