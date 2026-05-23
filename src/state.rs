@@ -172,6 +172,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "#,
         "CREATE INDEX IF NOT EXISTS notification_events_user_created_idx ON notification_events (user_id, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS notification_events_dedupe_idx ON notification_events (dedupe_key, user_id);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS notification_events_user_dedupe_unique_idx ON notification_events (dedupe_key, user_id) WHERE dedupe_key IS NOT NULL AND user_id IS NOT NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS push_delivery_jobs (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
