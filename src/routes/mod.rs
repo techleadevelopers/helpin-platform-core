@@ -81,7 +81,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/posts", post(posts::create_post))
         .route("/v1/posts/:id", get(posts::get_post))
         .route("/v1/posts/:id/like", post(posts::toggle_like))
-        .route("/v1/posts/:id/comments", post(posts::create_comment))
+        .route(
+            "/v1/posts/:id/comments",
+            get(posts::list_comments).post(posts::create_comment),
+        )
         .route("/v1/posts/:id/report", post(posts::report_post))
         .route(
             "/v1/media/upload-intents",
