@@ -97,14 +97,13 @@ async fn deliver_or_defer(
                 return Ok(());
             }
             Err(error) => {
-                defer_delivery(config, db, job.id, job.attempts, error.to_string()).await?;
+                defer_delivery(db, job.id, job.attempts, error.to_string()).await?;
                 return Ok(());
             }
         }
     }
 
     defer_delivery(
-        config,
         db,
         job.id,
         job.attempts,
@@ -187,7 +186,6 @@ fn expo_response_error(body: &Value) -> Option<String> {
 }
 
 async fn defer_delivery(
-    config: &Config,
     db: &PgPool,
     job_id: Uuid,
     attempts: i32,
