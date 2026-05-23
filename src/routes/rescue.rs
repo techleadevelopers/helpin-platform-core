@@ -1,3 +1,5 @@
+use std::time::Duration as StdDuration;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -16,7 +18,7 @@ use validator::Validate;
 use crate::{
     domain::AccountType,
     error::ApiError,
-    services::auth as auth_service,
+    services::{auth as auth_service, rate_limit},
     state::{AppState, RescueEvent},
 };
 
@@ -130,6 +132,21 @@ pub async fn trigger(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
     let reporter_user_id = authenticate_user(&state, &headers, None)?;
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:trigger:{reporter_user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+    let post_id = Uuid::parse_str(&payload.post_id).map_err(|_| ApiError::NotFound)?;
+    let post_exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM posts WHERE id = $1")
+        .bind(post_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if post_exists.is_none() {
+        return Err(ApiError::NotFound);
+    }
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -140,7 +157,7 @@ pub async fn trigger(
         "#,
     )
     .bind(Uuid::now_v7())
-    .bind(&payload.post_id)
+    .bind(post_id)
     .bind(reporter_user_id)
     .bind(payload.lat)
     .bind(payload.lng)
@@ -178,7 +195,16 @@ pub async fn update_location(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
-    authenticate_user(&state, &headers, None)?;
+    let claims = authenticate_claims(&state, &headers, None)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let is_admin = matches!(claims.account_type, AccountType::Admin);
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:location:{user_id}"),
+        state.config.throttle_limit * 6,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -190,6 +216,7 @@ pub async fn update_location(
             updated_at = now()
         WHERE id = $1
           AND status = 'active'
+          AND (reporter_user_id = $5 OR $6::boolean = true)
         RETURNING id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at
         "#,
     )
@@ -197,6 +224,8 @@ pub async fn update_location(
     .bind(payload.lat)
     .bind(payload.lng)
     .bind(payload.accuracy)
+    .bind(user_id)
+    .bind(is_admin)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(ApiError::NotFound)?;
@@ -214,7 +243,16 @@ pub async fn end(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RescueResponse>, ApiError> {
-    authenticate_user(&state, &headers, None)?;
+    let claims = authenticate_claims(&state, &headers, None)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let is_admin = matches!(claims.account_type, AccountType::Admin);
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:end:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
         r#"
@@ -223,10 +261,14 @@ pub async fn end(
             updated_at = now(),
             ended_at = COALESCE(ended_at, now())
         WHERE id = $1
+          AND status = 'active'
+          AND (reporter_user_id = $2 OR $3::boolean = true)
         RETURNING id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at
         "#,
     )
     .bind(id)
+    .bind(user_id)
+    .bind(is_admin)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(ApiError::NotFound)?;
@@ -259,7 +301,14 @@ pub async fn incident(
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
-    authenticate_user(&state, &headers, None)?;
+    let user_id = authenticate_user(&state, &headers, None)?;
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:incident:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
 
     let exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
@@ -388,7 +437,11 @@ async fn handle_rescue_socket(state: AppState, rescue_id: Uuid, socket: WebSocke
 fn row_to_rescue(row: sqlx::postgres::PgRow) -> RescueSession {
     RescueSession {
         id: row.get::<Uuid, _>("id").to_string(),
-        post_id: row.get("post_id"),
+        post_id: row
+            .try_get::<Uuid, _>("post_id")
+            .map(|value| value.to_string())
+            .or_else(|_| row.try_get::<String, _>("post_id"))
+            .unwrap_or_default(),
         reporter_user_id: optional_uuid(&row, "reporter_user_id"),
         reporter_name: optional_string(&row, "reporter_name"),
         reporter_email: optional_string(&row, "reporter_email"),
@@ -444,6 +497,15 @@ fn authenticate_user(
     headers: &HeaderMap,
     query_token: Option<&str>,
 ) -> Result<Uuid, ApiError> {
+    authenticate_claims(state, headers, query_token)
+        .and_then(|claims| Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized))
+}
+
+fn authenticate_claims(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Result<auth_service::AccessClaims, ApiError> {
     let token = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -455,9 +517,7 @@ fn authenticate_user(
         .or_else(|| query_token.filter(|value| !value.trim().is_empty()))
         .ok_or(ApiError::Unauthorized)?;
 
-    auth_service::verify_access_token(&state.config, token)
-        .map_err(|_| ApiError::Unauthorized)
-        .and_then(|claims| Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized))
+    auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
 }
 
 fn authenticate_admin(
