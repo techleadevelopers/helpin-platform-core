@@ -139,6 +139,7 @@ mod tests {
             otel_exporter_otlp_endpoint: None,
             push_worker_enabled: false,
             push_provider: "expo".into(),
+            expo_access_token: None,
         };
 
         let token =
