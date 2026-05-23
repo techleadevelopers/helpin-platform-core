@@ -1,4 +1,4 @@
-﻿use std::net::SocketAddr;
+use std::net::SocketAddr;
 
 use anyhow::Context;
 use axum::http::{HeaderValue, Method};
@@ -53,7 +53,11 @@ fn init_tracing(config: &Config) -> anyhow::Result<Option<SdkTracerProvider>> {
             .build()
             .context("failed to build OTLP trace exporter")?;
         let provider = SdkTracerProvider::builder()
-            .with_resource(Resource::builder().with_service_name("zoohelp-backend").build())
+            .with_resource(
+                Resource::builder()
+                    .with_service_name("zoohelp-backend")
+                    .build(),
+            )
             .with_batch_exporter(exporter)
             .build();
         let tracer = provider.tracer("zoohelp-backend");
