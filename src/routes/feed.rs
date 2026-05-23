@@ -1,8 +1,13 @@
 use axum::{
-    extract::{Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
+    response::Response,
     Json,
 };
 use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use sqlx::Row;
 
@@ -34,6 +39,10 @@ pub async fn list_feed(
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<Vec<Post>>, ApiError> {
     Ok(Json(load_db_posts(&state, &query).await?))
+}
+
+pub async fn feed_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| handle_feed_socket(state, socket))
 }
 
 #[cfg(test)]
@@ -141,7 +150,28 @@ pub(crate) async fn load_db_posts(
             )
           )
         ORDER BY
-          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1 ELSE 0 END DESC,
+          (
+            CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 100 ELSE 0 END +
+            CASE WHEN p.post_type = 'emergency' AND p.rescue_status <> 'resolved' THEN 40 ELSE 0 END +
+            CASE WHEN p.rescue_status = 'active' THEN 30 ELSE 0 END +
+            CASE WHEN u.verified THEN 12 ELSE 0 END +
+            LEAST(COALESCE(u.trust_score, 0), 100) / 5.0 +
+            LEAST(GREATEST(p.comments_count, 0), 30) * 0.6 +
+            LEAST(GREATEST(p.likes_count, 0), 80) * 0.15 +
+            CASE
+              WHEN p.created_at > now() - interval '1 hour' THEN 16
+              WHEN p.created_at > now() - interval '6 hours' THEN 8
+              WHEN p.created_at > now() - interval '24 hours' THEN 3
+              ELSE 0
+            END
+          ) DESC,
+          CASE
+            WHEN $5::double precision IS NULL OR $6::double precision IS NULL OR p.geo IS NULL THEN 25
+            ELSE LEAST(
+              ST_Distance(p.geo, ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography) / 1000.0,
+              50
+            )
+          END ASC,
           p.created_at DESC
         LIMIT $8
         "#
@@ -201,7 +231,21 @@ pub(crate) async fn load_db_posts(
             )
           )
         ORDER BY
-          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1 ELSE 0 END DESC,
+          (
+            CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 100 ELSE 0 END +
+            CASE WHEN p.post_type = 'emergency' AND p.rescue_status <> 'resolved' THEN 40 ELSE 0 END +
+            CASE WHEN p.rescue_status = 'active' THEN 30 ELSE 0 END +
+            CASE WHEN u.verified THEN 12 ELSE 0 END +
+            LEAST(COALESCE(u.trust_score, 0), 100) / 5.0 +
+            LEAST(GREATEST(p.comments_count, 0), 30) * 0.6 +
+            LEAST(GREATEST(p.likes_count, 0), 80) * 0.15 +
+            CASE
+              WHEN p.created_at > now() - interval '1 hour' THEN 16
+              WHEN p.created_at > now() - interval '6 hours' THEN 8
+              WHEN p.created_at > now() - interval '24 hours' THEN 3
+              ELSE 0
+            END
+          ) DESC,
           CASE
             WHEN $5::double precision IS NULL OR $6::double precision IS NULL THEN 0
             ELSE ((p.latitude - $5) * (p.latitude - $5)) + ((p.longitude - $6) * (p.longitude - $6))
@@ -275,6 +319,47 @@ fn account_type_as_str(value: &AccountType) -> &'static str {
         AccountType::Ong => "ong",
         AccountType::Vet => "vet",
         AccountType::Admin => "admin",
+    }
+}
+
+async fn handle_feed_socket(state: AppState, socket: WebSocket) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.feed_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        tracing::debug!(?error, "feed websocket receive error");
+                        break;
+                    }
+                }
+            }
+            event = rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        let Ok(payload) = serde_json::to_string(&event) else {
+                            continue;
+                        };
+                        if sender.send(Message::Text(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(?error, "feed broadcast receive error");
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
