@@ -51,7 +51,8 @@ pub async fn list_rooms(
     State(state): State<AppState>,
     Query(query): Query<ListRoomsQuery>,
 ) -> Result<Json<Vec<ChatConversation>>, ApiError> {
-    authenticate_request(&state, &headers)?;
+    let claims = authenticate_request(&state, &headers)?;
+    let current_user_id = parse_claim_user_id(&claims)?;
     let post_id = query.post_id.as_deref().map(parse_uuid).transpose()?;
 
     let rows = sqlx::query(
@@ -62,14 +63,13 @@ pub async fn list_rooms(
           COALESCE(p.name, p.title, 'Caso ZooHelp') AS post_title,
           COALESCE(last_message.body, '') AS last_message,
           COALESCE(last_message.created_at, r.created_at) AS last_message_time,
-          COALESCE(u.id, r.post_id)::text AS participant_id,
-          COALESCE(u.name, 'ZooHelp') AS participant_name,
-          u.avatar_url AS participant_avatar,
-          COALESCE(u.verified, false) AS participant_verified,
-          COALESCE(u.account_type::text, 'person') AS participant_type
+          COALESCE(participant_user.id, r.post_id)::text AS participant_id,
+          COALESCE(participant_user.name, 'ZooHelp') AS participant_name,
+          participant_user.avatar_url AS participant_avatar,
+          COALESCE(participant_user.verified, false) AS participant_verified,
+          COALESCE(participant_user.account_type::text, 'person') AS participant_type
         FROM chat_rooms r
         LEFT JOIN posts p ON p.id = r.post_id
-        LEFT JOIN users u ON u.id = p.author_id
         LEFT JOIN LATERAL (
           SELECT body, created_at
           FROM chat_messages
@@ -77,12 +77,33 @@ pub async fn list_rooms(
           ORDER BY created_at DESC
           LIMIT 1
         ) last_message ON true
-        WHERE ($1::uuid IS NULL OR r.post_id = $1)
+        LEFT JOIN LATERAL (
+          SELECT sender_id
+          FROM chat_messages
+          WHERE room_id = r.id AND sender_id <> $2
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) other_sender ON true
+        LEFT JOIN users participant_user ON participant_user.id = CASE
+          WHEN p.author_id = $2 THEN other_sender.sender_id
+          ELSE p.author_id
+        END
+        WHERE (
+          ($1::uuid IS NOT NULL AND r.post_id = $1)
+          OR ($1::uuid IS NULL AND (
+            p.author_id = $2
+            OR EXISTS (
+              SELECT 1 FROM chat_messages mine
+              WHERE mine.room_id = r.id AND mine.sender_id = $2
+            )
+          ))
+        )
         ORDER BY COALESCE(last_message.created_at, r.created_at) DESC
         LIMIT 100
         "#,
     )
     .bind(post_id)
+    .bind(current_user_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -94,9 +115,10 @@ pub async fn get_room(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ChatConversation>, ApiError> {
-    authenticate_request(&state, &headers)?;
+    let claims = authenticate_request(&state, &headers)?;
+    let current_user_id = parse_claim_user_id(&claims)?;
     let room_id = parse_uuid(&id)?;
-    load_room(&state, room_id).await.map(Json)
+    load_room(&state, room_id, current_user_id).await.map(Json)
 }
 
 pub async fn list_messages(
@@ -234,7 +256,11 @@ async fn handle_socket(state: AppState, room_id: Uuid, sender_user_id: Uuid, soc
     }
 }
 
-async fn load_room(state: &AppState, room_id: Uuid) -> Result<ChatConversation, ApiError> {
+async fn load_room(
+    state: &AppState,
+    room_id: Uuid,
+    current_user_id: Uuid,
+) -> Result<ChatConversation, ApiError> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -243,14 +269,13 @@ async fn load_room(state: &AppState, room_id: Uuid) -> Result<ChatConversation, 
           COALESCE(p.name, p.title, 'Caso ZooHelp') AS post_title,
           COALESCE(last_message.body, '') AS last_message,
           COALESCE(last_message.created_at, r.created_at) AS last_message_time,
-          COALESCE(u.id, r.post_id)::text AS participant_id,
-          COALESCE(u.name, 'ZooHelp') AS participant_name,
-          u.avatar_url AS participant_avatar,
-          COALESCE(u.verified, false) AS participant_verified,
-          COALESCE(u.account_type::text, 'person') AS participant_type
+          COALESCE(participant_user.id, r.post_id)::text AS participant_id,
+          COALESCE(participant_user.name, 'ZooHelp') AS participant_name,
+          participant_user.avatar_url AS participant_avatar,
+          COALESCE(participant_user.verified, false) AS participant_verified,
+          COALESCE(participant_user.account_type::text, 'person') AS participant_type
         FROM chat_rooms r
         LEFT JOIN posts p ON p.id = r.post_id
-        LEFT JOIN users u ON u.id = p.author_id
         LEFT JOIN LATERAL (
           SELECT body, created_at
           FROM chat_messages
@@ -258,10 +283,22 @@ async fn load_room(state: &AppState, room_id: Uuid) -> Result<ChatConversation, 
           ORDER BY created_at DESC
           LIMIT 1
         ) last_message ON true
+        LEFT JOIN LATERAL (
+          SELECT sender_id
+          FROM chat_messages
+          WHERE room_id = r.id AND sender_id <> $2
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) other_sender ON true
+        LEFT JOIN users participant_user ON participant_user.id = CASE
+          WHEN p.author_id = $2 THEN other_sender.sender_id
+          ELSE p.author_id
+        END
         WHERE r.id = $1
         "#,
     )
     .bind(room_id)
+    .bind(current_user_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(ApiError::NotFound)?;
