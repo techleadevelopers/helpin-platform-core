@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sqlx::Row;
 
 use crate::{
-    domain::{AccountType, Author, Post, PostType},
+    domain::{AccountType, Author, Post, PostType, RescueOperationalSummary},
     error::ApiError,
     routes::posts::{animal_type_from_str, post_type_as_str, post_type_from_str},
     state::AppState,
@@ -126,6 +126,9 @@ pub(crate) async fn load_db_posts(
             p.tags,
             COALESCE(p.latitude, -23.5505) AS latitude,
             COALESCE(p.longitude, -46.6333) AS longitude,
+            fs.current_phase AS fanout_phase,
+            COALESCE(fs.confirmed_count, 0) AS help_going_count,
+            COALESCE(fs.arrived_count, 0) AS help_arrived_count,
             u.id::text AS author_id,
             u.name AS author_name,
             u.avatar_url AS author_avatar,
@@ -133,6 +136,7 @@ pub(crate) async fn load_db_posts(
             u.account_type::text AS author_type
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
+        LEFT JOIN rescue_fanout_states fs ON fs.post_id = p.id
         WHERE p.moderation_status = 'approved'
           AND u.deleted_at IS NULL
           AND ($1::post_type IS NULL OR p.post_type = $1::post_type)
@@ -206,6 +210,9 @@ pub(crate) async fn load_db_posts(
             p.tags,
             COALESCE(p.latitude, -23.5505) AS latitude,
             COALESCE(p.longitude, -46.6333) AS longitude,
+            fs.current_phase AS fanout_phase,
+            COALESCE(fs.confirmed_count, 0) AS help_going_count,
+            COALESCE(fs.arrived_count, 0) AS help_arrived_count,
             u.id::text AS author_id,
             u.name AS author_name,
             u.avatar_url AS author_avatar,
@@ -213,6 +220,7 @@ pub(crate) async fn load_db_posts(
             u.account_type::text AS author_type
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
+        LEFT JOIN rescue_fanout_states fs ON fs.post_id = p.id
         WHERE p.moderation_status = 'approved'
           AND u.deleted_at IS NULL
           AND ($1::post_type IS NULL OR p.post_type = $1::post_type)
@@ -308,9 +316,30 @@ pub(crate) async fn load_db_posts(
                 tags: row.get("tags"),
                 latitude: row.get("latitude"),
                 longitude: row.get("longitude"),
+                rescue_operational: rescue_operational_from_row(&row),
             }
         })
         .collect())
+}
+
+fn rescue_operational_from_row(row: &sqlx::postgres::PgRow) -> Option<RescueOperationalSummary> {
+    let phase = row.try_get::<Option<i32>, _>("fanout_phase").ok().flatten();
+    let going = row.try_get::<i32, _>("help_going_count").unwrap_or(0);
+    let arrived = row.try_get::<i32, _>("help_arrived_count").unwrap_or(0);
+    phase.map(|fanout_phase| RescueOperationalSummary {
+        fanout_phase: Some(fanout_phase),
+        help_going_count: going,
+        help_arrived_count: arrived,
+        operational_label: if arrived > 0 {
+            "Ajuda no local".to_string()
+        } else if going == 1 {
+            "1 pessoa a caminho".to_string()
+        } else if going > 1 {
+            format!("{going} pessoas a caminho")
+        } else {
+            "Precisa de ajuda".to_string()
+        },
+    })
 }
 
 fn account_type_as_str(value: &AccountType) -> &'static str {
