@@ -1,4 +1,4 @@
-use std::time::Duration as StdDuration;
+use std::{collections::HashMap, time::Duration as StdDuration};
 
 use axum::{
     extract::{Path, State},
@@ -1105,15 +1105,22 @@ pub(crate) async fn load_post_by_id(
     .fetch_optional(&state.db)
     .await?;
 
-    Ok(row.map(|row| {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let mut media_by_post = load_post_media(state, &[post_id]).await?;
+
+    Ok(Some({
         let author_type = match row.get::<&str, _>("author_type") {
             "ong" => AccountType::Ong,
             "vet" => AccountType::Vet,
             "admin" => AccountType::Admin,
             _ => AccountType::Person,
         };
-        Post {
-            id: row.get("id"),
+        let id: String = row.get("id");
+        let mut post = Post {
+            id: id.clone(),
             post_type: post_type_from_str(row.get::<&str, _>("post_type")),
             animal_type: animal_type_from_str(row.get::<&str, _>("animal_type")),
             name: row.get("name"),
@@ -1148,8 +1155,64 @@ pub(crate) async fn load_post_by_id(
             latitude: row.get("latitude"),
             longitude: row.get("longitude"),
             rescue_operational: rescue_operational_from_row(&row),
+        };
+        post.images = media_by_post.remove(&id).unwrap_or_default();
+        if post.image.is_none() {
+            post.image = post.images.first().map(|image| image.url.clone());
         }
+        post
     }))
+}
+
+pub(crate) async fn load_post_media(
+    state: &AppState,
+    post_ids: &[Uuid],
+) -> Result<HashMap<String, Vec<PostMedia>>, sqlx::Error> {
+    if post_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            post_id::text AS post_id,
+            id::text AS id,
+            public_url,
+            content_type,
+            width,
+            height,
+            size_bytes,
+            moderation_status
+        FROM post_media
+        WHERE post_id = ANY($1)
+        ORDER BY post_id, sort_order ASC, created_at ASC
+        "#,
+    )
+    .bind(post_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut media_by_post: HashMap<String, Vec<PostMedia>> = HashMap::new();
+    for row in rows {
+        let post_id: String = row.get("post_id");
+        media_by_post.entry(post_id).or_default().push(PostMedia {
+            id: row.get("id"),
+            url: row.get("public_url"),
+            content_type: row.get("content_type"),
+            width: row
+                .get::<Option<i32>, _>("width")
+                .and_then(|value| u32::try_from(value).ok()),
+            height: row
+                .get::<Option<i32>, _>("height")
+                .and_then(|value| u32::try_from(value).ok()),
+            size_bytes: row
+                .get::<Option<i64>, _>("size_bytes")
+                .and_then(|value| u64::try_from(value).ok()),
+            moderation_status: row.get("moderation_status"),
+        });
+    }
+
+    Ok(media_by_post)
 }
 
 fn rescue_operational_from_row(row: &sqlx::postgres::PgRow) -> Option<RescueOperationalSummary> {
@@ -1166,6 +1229,10 @@ fn rescue_operational_from_row(row: &sqlx::postgres::PgRow) -> Option<RescueOper
             "1 pessoa a caminho".to_string()
         } else if going > 1 {
             format!("{going} pessoas a caminho")
+        } else if fanout_phase >= 9 {
+            "Acionando apoio ambiental".to_string()
+        } else if fanout_phase >= 6 {
+            "Buscando apoio regional".to_string()
         } else {
             "Precisa de ajuda".to_string()
         },
