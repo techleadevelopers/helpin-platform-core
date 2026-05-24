@@ -36,6 +36,7 @@ pub struct RegisterRequest {
     #[validate(length(min = 8))]
     pub password: String,
     pub account_type: Option<AccountType>,
+    pub gender: Option<String>,
     pub avatar: Option<String>,
     pub ong_type: Option<String>,
     pub cnpj: Option<String>,
@@ -61,6 +62,7 @@ pub struct UserProfile {
     #[serde(rename = "type")]
     pub account_type: AccountType,
     pub verified: bool,
+    pub gender: Option<String>,
     pub posts_count: u32,
     pub helped_count: u32,
     pub adoptions_count: u32,
@@ -188,6 +190,7 @@ pub async fn login(
                 None,
                 AccountType::Person,
                 None,
+                None,
             )
             .map(Json)
         }
@@ -243,6 +246,7 @@ pub async fn register(
                 &payload.email,
                 payload.avatar.as_deref(),
                 account_type.clone(),
+                normalize_gender(payload.gender.as_deref()),
                 fallback_ong_record(&payload, &account_type),
             )?;
             let token = new_action_token();
@@ -496,6 +500,7 @@ struct UserRecord {
     password_hash: String,
     account_type: AccountType,
     verified: bool,
+    gender: Option<String>,
 }
 
 #[derive(Debug)]
@@ -521,7 +526,7 @@ async fn find_user_by_email(
 ) -> Result<Option<UserRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
+        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender
         FROM users
         WHERE email = $1
         "#,
@@ -536,7 +541,7 @@ async fn find_user_by_email(
 async fn find_user_by_id(state: &AppState, id: Uuid) -> Result<Option<UserRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
+        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender
         FROM users
         WHERE id = $1
         "#,
@@ -559,9 +564,9 @@ async fn insert_user_with_optional_ong(
     let user_id = Uuid::now_v7();
     let row = sqlx::query(
         r#"
-        INSERT INTO users (id, name, email, avatar_url, password_hash, account_type)
-        VALUES ($1, $2, $3, $4, $5, $6::account_type)
-        RETURNING id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified
+        INSERT INTO users (id, name, email, avatar_url, password_hash, account_type, gender)
+        VALUES ($1, $2, $3, $4, $5, $6::account_type, $7)
+        RETURNING id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender
         "#,
     )
     .bind(user_id)
@@ -570,6 +575,7 @@ async fn insert_user_with_optional_ong(
     .bind(payload.avatar.as_deref())
     .bind(password_hash)
     .bind(account_type_str)
+    .bind(normalize_gender(payload.gender.as_deref()))
     .fetch_one(&mut *tx)
     .await?;
 
@@ -675,6 +681,7 @@ fn row_to_user_record(row: sqlx::postgres::PgRow) -> UserRecord {
         password_hash: row.get("password_hash"),
         account_type: auth_service::account_type_from_str(row.get::<&str, _>("account_type")),
         verified: row.get("verified"),
+        gender: row.get("gender"),
     }
 }
 
@@ -813,6 +820,7 @@ async fn issue_auth_response(
         record.avatar.as_deref(),
         record.account_type,
         record.verified,
+        record.gender,
         ong_record,
         access_token,
         refresh_token,
@@ -826,6 +834,7 @@ fn issue_fallback_response(
     email: &str,
     avatar: Option<&str>,
     account_type: AccountType,
+    gender: Option<String>,
     ong_record: Option<OngRecord>,
 ) -> Result<AuthResponse, ApiError> {
     let access_token =
@@ -842,6 +851,7 @@ fn issue_fallback_response(
         avatar,
         account_type,
         false,
+        gender,
         ong_record,
         access_token,
         auth_service::new_refresh_token(),
@@ -855,6 +865,7 @@ fn auth_response(
     avatar: Option<&str>,
     account_type: AccountType,
     verified: bool,
+    gender: Option<String>,
     ong_record: Option<OngRecord>,
     access_token: String,
     refresh_token: String,
@@ -877,6 +888,7 @@ fn auth_response(
             bio: "Apaixonada por animais".into(),
             account_type,
             verified: user_verified,
+            gender,
             posts_count: 0,
             helped_count: 0,
             adoptions_count: 0,
@@ -921,6 +933,7 @@ fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> C
             bio: "Apaixonada por animais".into(),
             account_type: record.account_type,
             verified: user_verified,
+            gender: record.gender,
             posts_count: 0,
             helped_count: 0,
             adoptions_count: 0,
@@ -947,6 +960,17 @@ fn validate_ong_payload(
     payload: &RegisterRequest,
     account_type: &AccountType,
 ) -> Result<(), ApiError> {
+    if let Some(gender) = payload
+        .gender
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !matches!(gender, "male" | "female") {
+            return Err(ApiError::Validation("gender must be male or female".into()));
+        }
+    }
+
     if !matches!(account_type, AccountType::Ong) {
         return Ok(());
     }
@@ -1006,6 +1030,13 @@ fn validate_ong_payload(
     }
 
     Ok(())
+}
+
+fn normalize_gender(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| matches!(*value, "male" | "female"))
+        .map(str::to_string)
 }
 
 fn default_mission(ong_type: Option<&str>) -> &'static str {
