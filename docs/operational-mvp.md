@@ -54,6 +54,10 @@ The production MVP uses progressive operational fanout instead of one fixed-radi
 | 3 | `1.0 km` | `180s` | neighborhood response |
 | 4 | `3.0 km` | `300s` | broader nearby response |
 | 5 | ONG/verified/provider | `300s` | escalation to trusted actors |
+| 6 | `10 km` specialists | `300s` | local specialist search |
+| 7 | `30 km` specialists | `600s` | regional specialist search |
+| 8 | `100 km` specialists | `900s` | state-level specialist search |
+| 9 | `300 km` agencies/specialists | `1800s` | environmental agency / rare-case escalation |
 
 Candidate ranking must optimize for expected response, not only proximity:
 
@@ -66,6 +70,22 @@ Candidate ranking must optimize for expected response, not only proximity:
 - fatigue penalty for too many recent alerts
 
 `Estou indo` is an operational response, not a resolution. It should create or update `rescue_responses`, increment the public helper count, and pause aggressive expansion. The case remains open until explicitly resolved, cancelled, or completed by the appropriate flow.
+
+After local fanout is exhausted, the system must not broadcast blindly to everyone. It enters specialist escalation:
+
+- `rescue_specialist_providers` stores CETAS, IBAMA, environmental police, fire department, wildlife rescue, marine rescue, rural rescue, vets and verified NGOs.
+- providers declare `animal_scopes` such as `dog`, `cat`, `wildlife`, `bird`, `marine`, `livestock`, `reptile` or `general`.
+- `rescue_escalation_attempts` records each escalation phase, strategy, radius, candidate count and contacted count.
+- if there is no specialist registry match yet, fallback is limited to verified/ONG/vet/admin users with recent push subscriptions. It never falls back to generic unverified broadcast.
+
+This distinction matters operationally:
+
+```text
+fanout local -> who is close enough to help fast
+specialist escalation -> who is competent enough to solve the case
+```
+
+For animals outside the common dog/cat flow, such as birds, wildlife, marine animals, reptiles, livestock or road/rural cases, specialist escalation is the path that makes the system useful in distant places.
 
 Public labels should keep urgency alive:
 
