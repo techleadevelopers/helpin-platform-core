@@ -99,7 +99,9 @@ pub struct Post {
 pub struct Ong {
     pub id: String,
     pub name: String,
+    pub email: String,
     pub short_name: String,
+    pub avatar_url: Option<String>,
     pub description: String,
     pub mission: String,
     pub location: String,
@@ -361,7 +363,9 @@ fn ong(
     Ong {
         id: id.into(),
         name: name.into(),
+        email: String::new(),
         short_name: short_name.into(),
+        avatar_url: None,
         description: description.into(),
         mission: "Resgatar, tratar e recolocar animais em lares responsáveis.".into(),
         location: location.into(),
