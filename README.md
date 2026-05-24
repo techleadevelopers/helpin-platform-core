@@ -170,8 +170,14 @@ MVP fanout phases:
 | 3 | `1.0 km` | neighborhood expansion |
 | 4 | `3.0 km` | broader city-area expansion |
 | 5 | verified/ONG/provider escalation | include trusted institutional actors with wider radius |
+| 6 | `10 km` specialists | local specialist search |
+| 7 | `30 km` specialists | regional specialist search |
+| 8 | `100 km` specialists | state-level specialist search |
+| 9 | `300 km` agencies/specialists | environmental agency or rare-case escalation |
 
-The old rescue alert preview endpoint remains useful for contract preview, but production delivery should use the persisted fanout state and durable push jobs.
+Specialist escalation uses `rescue_specialist_providers` and `rescue_escalation_attempts`. It searches for competent responders by animal scope and provider type before falling back to verified/ONG/vet/admin users. It does not broadcast regional alerts to generic unverified users.
+
+The old rescue alert preview endpoint remains useful for contract preview, but production delivery should use the persisted fanout state, specialist escalation state and durable push jobs.
 
 ## Core Backend Surface
 
