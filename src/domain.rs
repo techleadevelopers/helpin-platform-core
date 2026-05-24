@@ -66,6 +66,15 @@ pub struct PostMedia {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RescueOperationalSummary {
+    pub fanout_phase: Option<i32>,
+    pub help_going_count: i32,
+    pub help_arrived_count: i32,
+    pub operational_label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Post {
     pub id: String,
     #[serde(rename = "type")]
@@ -92,6 +101,7 @@ pub struct Post {
     pub tags: Vec<String>,
     pub latitude: f64,
     pub longitude: f64,
+    pub rescue_operational: Option<RescueOperationalSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -432,6 +442,7 @@ fn post(
         tags: tags.iter().map(|tag| (*tag).into()).collect(),
         latitude,
         longitude,
+        rescue_operational: None,
     }
 }
 
