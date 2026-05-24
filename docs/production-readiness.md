@@ -41,6 +41,8 @@ Current production-shaped tables:
 - `rescue_fanout_states`
 - `rescue_fanout_attempts`
 - `rescue_responses`
+- `rescue_specialist_providers`
+- `rescue_escalation_attempts`
 
 Required before scale:
 
@@ -59,6 +61,7 @@ Required:
 - duplicate processing must be idempotent
 - duplicate push per user/post must be blocked or deduped
 - confirmed `Estou indo` must pause aggressive expansion without marking the case resolved
+- exhausted local fanout must escalate by competence, not generic broadcast
 - queue lag must be measured
 - queue consumers must be horizontally safe
 
@@ -136,6 +139,7 @@ MVP city pilot can proceed only when:
 - rescue fanout state is persisted
 - notification event/push job is persisted
 - `Estou indo` is persisted as a rescue response before the mobile UI marks `Indo`
+- specialist escalation attempts are persisted after local fanout exhaustion
 - failed push jobs go to retry/DLQ
 - admin observability shows DB, queue and DLQ state
 - backup restore is tested
