@@ -162,8 +162,15 @@ pub async fn geocode(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
-    let api_key = google_maps_key(&state)?;
-    let sanitized = sanitize_address(&query.address);
+    Ok(Json(geocode_address(&state, &query.address).await?))
+}
+
+pub async fn geocode_address(
+    state: &AppState,
+    address: &str,
+) -> Result<Option<GeocodeResponse>, ApiError> {
+    let api_key = google_maps_key(state)?;
+    let sanitized = sanitize_address(address);
     let url = format!(
         "https://maps.googleapis.com/maps/api/geocode/json?address={}&region=br&language=pt-BR&key={}",
         url_component(&sanitized),
@@ -182,9 +189,9 @@ pub async fn geocode(
             ApiError::ServiceUnavailable
         })?;
 
-    Ok(Json(payload.results.and_then(|mut results| {
-        results.drain(..).find_map(geocode_response_from_result)
-    })))
+    Ok(payload
+        .results
+        .and_then(|mut results| results.drain(..).find_map(geocode_response_from_result)))
 }
 
 pub async fn place_autocomplete(
