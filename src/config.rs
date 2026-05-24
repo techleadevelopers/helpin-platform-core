@@ -37,6 +37,7 @@ pub struct Config {
     pub sentry_dsn: Option<String>,
     pub otel_exporter_otlp_endpoint: Option<String>,
     pub push_worker_enabled: bool,
+    pub rescue_fanout_worker_enabled: bool,
     pub push_provider: String,
     pub expo_access_token: Option<String>,
     pub throttle_ttl_seconds: u64,
@@ -132,6 +133,15 @@ impl Config {
                 .ok()
                 .map(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
                 .unwrap_or(false),
+            rescue_fanout_worker_enabled: env::var("RESCUE_FANOUT_WORKER_ENABLED")
+                .ok()
+                .map(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
+                .unwrap_or_else(|| {
+                    env::var("PUSH_WORKER_ENABLED")
+                        .ok()
+                        .map(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"))
+                        .unwrap_or(false)
+                }),
             push_provider: env::var("PUSH_PROVIDER").unwrap_or_else(|_| "expo".to_string()),
             expo_access_token: env::var("EXPO_ACCESS_TOKEN")
                 .ok()
