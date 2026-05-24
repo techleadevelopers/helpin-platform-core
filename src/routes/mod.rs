@@ -39,6 +39,10 @@ pub fn router(state: AppState) -> Router {
             post(auth::request_password_reset),
         )
         .route(
+            "/v1/auth/password-reset/confirm",
+            post(auth::confirm_password_reset),
+        )
+        .route(
             "/v1/admin/ongs/pending-verification",
             get(admin::pending_ongs),
         )
@@ -79,7 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/feed", get(feed::list_feed))
         .route("/v1/feed/ws", get(feed::feed_ws))
         .route("/v1/posts", post(posts::create_post))
-        .route("/v1/posts/:id", get(posts::get_post))
+        .route("/v1/posts/:id", get(posts::get_post).delete(posts::delete_post))
         .route("/v1/posts/:id/like", post(posts::toggle_like))
         .route(
             "/v1/posts/:id/comments",
