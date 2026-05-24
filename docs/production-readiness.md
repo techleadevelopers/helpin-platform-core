@@ -27,6 +27,8 @@ Required:
 - push subscriptions stored in PostgreSQL
 - notification event stored before delivery attempt
 - push delivery job stored with status
+- rescue fanout state stored before phased delivery
+- rescue helper responses stored before public UI shows someone going
 - provider response persisted
 - delivery retry state persisted
 - no successful UI state based only on in-memory broadcast
@@ -36,6 +38,9 @@ Current production-shaped tables:
 - `push_subscriptions`
 - `notification_events`
 - `push_delivery_jobs`
+- `rescue_fanout_states`
+- `rescue_fanout_attempts`
+- `rescue_responses`
 
 Required before scale:
 
@@ -48,9 +53,12 @@ Required before scale:
 
 Required:
 
-- rescue alert event persisted before fanout
+- rescue alert/fanout event persisted before fanout
+- fanout phase and next run time persisted before worker processing
 - workers claim jobs with `FOR UPDATE SKIP LOCKED` or equivalent lease
 - duplicate processing must be idempotent
+- duplicate push per user/post must be blocked or deduped
+- confirmed `Estou indo` must pause aggressive expansion without marking the case resolved
 - queue lag must be measured
 - queue consumers must be horizontally safe
 
@@ -114,7 +122,7 @@ Required:
 
 - Grafana dashboard screenshot from staging
 - Prometheus metrics scrape from `/metrics`
-- OpenTelemetry trace for post -> alert -> notification
+- OpenTelemetry trace for post -> fanout state -> push job -> notification
 - k6/Locust/Vegeta benchmark report
 - API restart test proving persistence
 - worker restart test proving queued jobs resume
@@ -125,7 +133,9 @@ MVP city pilot can proceed only when:
 
 - emergency post returns only after database commit
 - user feed shows post immediately
-- notification event is persisted
+- rescue fanout state is persisted
+- notification event/push job is persisted
+- `Estou indo` is persisted as a rescue response before the mobile UI marks `Indo`
 - failed push jobs go to retry/DLQ
 - admin observability shows DB, queue and DLQ state
 - backup restore is tested
