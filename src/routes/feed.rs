@@ -154,30 +154,7 @@ pub(crate) async fn load_db_posts(
               $7
             )
           )
-        ORDER BY
-          (
-            CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 100 ELSE 0 END +
-            CASE WHEN p.post_type = 'emergency' AND p.rescue_status <> 'resolved' THEN 40 ELSE 0 END +
-            CASE WHEN p.rescue_status = 'active' THEN 30 ELSE 0 END +
-            CASE WHEN u.verified THEN 12 ELSE 0 END +
-            LEAST(COALESCE(u.trust_score, 0), 100) / 5.0 +
-            LEAST(GREATEST(p.comments_count, 0), 30) * 0.6 +
-            LEAST(GREATEST(p.likes_count, 0), 80) * 0.15 +
-            CASE
-              WHEN p.created_at > now() - interval '1 hour' THEN 16
-              WHEN p.created_at > now() - interval '6 hours' THEN 8
-              WHEN p.created_at > now() - interval '24 hours' THEN 3
-              ELSE 0
-            END
-          ) DESC,
-          CASE
-            WHEN $5::double precision IS NULL OR $6::double precision IS NULL OR p.geo IS NULL THEN 25
-            ELSE LEAST(
-              ST_Distance(p.geo, ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography) / 1000.0,
-              50
-            )
-          END ASC,
-          p.created_at DESC
+        ORDER BY p.created_at DESC, p.id DESC
         LIMIT $8
         "#
     } else {
@@ -239,27 +216,7 @@ pub(crate) async fn load_db_posts(
                 $6 + ($7 / (111000.0 * GREATEST(abs(cos(radians($5))), 0.2)))
             )
           )
-        ORDER BY
-          (
-            CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 100 ELSE 0 END +
-            CASE WHEN p.post_type = 'emergency' AND p.rescue_status <> 'resolved' THEN 40 ELSE 0 END +
-            CASE WHEN p.rescue_status = 'active' THEN 30 ELSE 0 END +
-            CASE WHEN u.verified THEN 12 ELSE 0 END +
-            LEAST(COALESCE(u.trust_score, 0), 100) / 5.0 +
-            LEAST(GREATEST(p.comments_count, 0), 30) * 0.6 +
-            LEAST(GREATEST(p.likes_count, 0), 80) * 0.15 +
-            CASE
-              WHEN p.created_at > now() - interval '1 hour' THEN 16
-              WHEN p.created_at > now() - interval '6 hours' THEN 8
-              WHEN p.created_at > now() - interval '24 hours' THEN 3
-              ELSE 0
-            END
-          ) DESC,
-          CASE
-            WHEN $5::double precision IS NULL OR $6::double precision IS NULL THEN 0
-            ELSE ((p.latitude - $5) * (p.latitude - $5)) + ((p.longitude - $6) * (p.longitude - $6))
-          END ASC,
-          p.created_at DESC
+        ORDER BY p.created_at DESC, p.id DESC
         LIMIT $8
         "#
     };
