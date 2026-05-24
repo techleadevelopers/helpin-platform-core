@@ -19,6 +19,7 @@ const WORKER_INTERVAL_SECONDS: u64 = 15;
 const CLAIM_BATCH_SIZE: i64 = 20;
 const ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES: i64 = 15;
 const MAX_CANDIDATES_PER_ATTEMPT: usize = 250;
+const MAX_SPECIALIST_CANDIDATES_PER_ATTEMPT: usize = 80;
 const MAX_RECENT_RESCUE_ALERTS_30M: i32 = 3;
 const MAX_RECENT_RESCUE_ALERTS_60M: i32 = 6;
 const EARTH_KM_PER_DEGREE: f64 = 111.0;
@@ -64,6 +65,41 @@ const FANOUT_PHASES: [FanoutPhase; 5] = [
     },
 ];
 
+#[derive(Clone, Copy, Debug)]
+struct EscalationPhase {
+    phase: i32,
+    radius_km: f64,
+    next_delay_seconds: i64,
+    strategy: &'static str,
+}
+
+const ESCALATION_PHASES: [EscalationPhase; 4] = [
+    EscalationPhase {
+        phase: 6,
+        radius_km: 10.0,
+        next_delay_seconds: 300,
+        strategy: "specialist_local",
+    },
+    EscalationPhase {
+        phase: 7,
+        radius_km: 30.0,
+        next_delay_seconds: 600,
+        strategy: "specialist_regional",
+    },
+    EscalationPhase {
+        phase: 8,
+        radius_km: 100.0,
+        next_delay_seconds: 900,
+        strategy: "specialist_state",
+    },
+    EscalationPhase {
+        phase: 9,
+        radius_km: 300.0,
+        next_delay_seconds: 1800,
+        strategy: "environmental_agency",
+    },
+];
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RescueResponseRecord {
@@ -91,6 +127,19 @@ struct Candidate {
     platform: PushPlatform,
     distance_km: f64,
     score: f64,
+}
+
+#[derive(Debug)]
+struct SpecialistCandidate {
+    provider_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+    name: String,
+    provider_type: String,
+    push_token: Option<String>,
+    platform: Option<PushPlatform>,
+    distance_km: f64,
+    score: f64,
+    contactable: bool,
 }
 
 pub fn spawn(enabled: bool, db: PgPool) {
@@ -228,12 +277,17 @@ pub async fn operational_summary(
         })
         .unwrap_or((None, 0, 0));
 
+    let fanout_phase = phase.unwrap_or_default();
     let operational_label = if arrived > 0 {
         "Ajuda no local".to_string()
     } else if going == 1 {
         "1 pessoa a caminho".to_string()
     } else if going > 1 {
         format!("{going} pessoas a caminho")
+    } else if fanout_phase >= 9 {
+        "Acionando apoio ambiental".to_string()
+    } else if fanout_phase >= 6 {
+        "Buscando apoio regional".to_string()
     } else if phase.is_some() {
         "Precisa de ajuda".to_string()
     } else {
@@ -341,19 +395,35 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
         return Ok(());
     }
 
-    let phase = phase_for(state.current_phase);
-    let Some(phase) = phase else {
-        complete_state(&mut tx, state.id, "exhausted").await?;
+    let post = load_post_for_fanout(&mut tx, state.post_id).await?;
+    if let Some(phase) = phase_for(state.current_phase) {
+        process_standard_phase(&mut tx, &state, &post, phase, confirmed_count).await?;
         tx.commit().await?;
         return Ok(());
-    };
+    }
 
-    let post = load_post_for_fanout(&mut tx, state.post_id).await?;
-    let candidates = ranked_candidates(&mut tx, &post, phase).await?;
+    if let Some(phase) = escalation_phase_for(state.current_phase) {
+        process_escalation_phase(&mut tx, &state, &post, phase).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    complete_state(&mut tx, state.id, "exhausted").await?;
+    tx.commit().await
+}
+
+async fn process_standard_phase(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &FanoutState,
+    post: &Post,
+    phase: FanoutPhase,
+    confirmed_count: i32,
+) -> Result<(), sqlx::Error> {
+    let candidates = ranked_candidates(tx, post, phase).await?;
     let candidate_count = candidates.len() as i32;
     let alert = alert_for_candidates(&post, phase, candidates);
     let recipient_count = alert.recipients.len() as i32;
-    persist_rescue_alert_tx(&mut tx, &alert).await?;
+    persist_rescue_alert_tx(tx, &alert).await?;
 
     sqlx::query(
         r#"
@@ -377,7 +447,7 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
     } else {
         "progressive_radius"
     })
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let next_phase = phase.phase + 1;
@@ -385,18 +455,18 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
         sqlx::query(
             r#"
             UPDATE rescue_fanout_states
-            SET current_phase = 5,
-                status = 'exhausted',
+            SET current_phase = 6,
                 last_radius_km = $2,
+                next_run_at = now() + ($3::text || ' seconds')::interval,
                 attempts = attempts + 1,
-                updated_at = now(),
-                completed_at = now()
+                updated_at = now()
             WHERE id = $1
             "#,
         )
         .bind(state.id)
         .bind(phase.radius_km)
-        .execute(&mut *tx)
+        .bind(phase.next_delay_seconds)
+        .execute(&mut **tx)
         .await?;
     } else {
         sqlx::query(
@@ -414,11 +484,200 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
         .bind(next_phase)
         .bind(phase.radius_km)
         .bind(phase.next_delay_seconds)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
-    tx.commit().await
+    Ok(())
+}
+
+async fn process_escalation_phase(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &FanoutState,
+    post: &Post,
+    phase: EscalationPhase,
+) -> Result<(), sqlx::Error> {
+    let scopes = animal_scopes_for_post(post);
+    let specialists = ranked_specialist_candidates(tx, post, phase, &scopes).await?;
+    let candidate_count = specialists.len() as i32;
+    let contacted_count =
+        persist_specialist_notifications_tx(tx, post, phase, &specialists).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO rescue_escalation_attempts (
+          id, fanout_state_id, post_id, phase, strategy, radius_km,
+          candidate_count, contacted_count, animal_scopes
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(state.id)
+    .bind(state.post_id)
+    .bind(phase.phase)
+    .bind(phase.strategy)
+    .bind(phase.radius_km)
+    .bind(candidate_count)
+    .bind(contacted_count)
+    .bind(&scopes)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO rescue_fanout_attempts (
+          id, fanout_state_id, post_id, phase, radius_km, candidate_count,
+          push_jobs_created, confirmed_count_at_run, reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(state.id)
+    .bind(state.post_id)
+    .bind(phase.phase)
+    .bind(phase.radius_km)
+    .bind(candidate_count)
+    .bind(contacted_count)
+    .bind(phase.strategy)
+    .execute(&mut **tx)
+    .await?;
+
+    let next_phase = phase.phase + 1;
+    if escalation_phase_for(next_phase).is_some() {
+        sqlx::query(
+            r#"
+            UPDATE rescue_fanout_states
+            SET current_phase = $2,
+                last_radius_km = $3,
+                next_run_at = now() + ($4::text || ' seconds')::interval,
+                attempts = attempts + 1,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(state.id)
+        .bind(next_phase)
+        .bind(phase.radius_km)
+        .bind(phase.next_delay_seconds)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE rescue_fanout_states
+            SET current_phase = $2,
+                status = 'exhausted',
+                last_radius_km = $3,
+                attempts = attempts + 1,
+                updated_at = now(),
+                completed_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(state.id)
+        .bind(phase.phase)
+        .bind(phase.radius_km)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn persist_specialist_notifications_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    post: &Post,
+    phase: EscalationPhase,
+    specialists: &[SpecialistCandidate],
+) -> Result<i32, sqlx::Error> {
+    let mut contacted = 0;
+    for specialist in specialists {
+        let Some(user_id) = specialist.user_id else {
+            if specialist.contactable {
+                contacted += 1;
+            }
+            continue;
+        };
+        let Some(push_token) = specialist.push_token.as_ref() else {
+            if specialist.contactable {
+                contacted += 1;
+            }
+            continue;
+        };
+        let Some(platform) = specialist.platform.as_ref() else {
+            continue;
+        };
+
+        let event_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            INSERT INTO notification_events (
+              user_id, kind, title, body, post_id, image_url, distance_km, critical,
+              deeplink, dedupe_key, ttl_seconds, category, payload
+            )
+            VALUES ($1, 'rescue_escalation', $2, $3, $4, $5, $6, true, $7, $8, 1800, 'rescue', $9)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(user_id)
+        .bind("ZooHelp: apoio especializado necessario")
+        .bind(format!(
+            "{} em {}. Caso sem resposta local; toque para coordenar ajuda especializada.",
+            post.name, post.neighborhood
+        ))
+        .bind(&post.id)
+        .bind(post.image.as_deref())
+        .bind(specialist.distance_km)
+        .bind(format!("zoohelp://post/{}?action=specialist", post.id))
+        .bind(format!(
+            "rescue-escalation:{}:{}:{}",
+            post.id, phase.phase, user_id
+        ))
+        .bind(serde_json::json!({
+            "phase": phase.phase,
+            "strategy": phase.strategy,
+            "radiusKm": phase.radius_km,
+            "providerId": specialist.provider_id.map(|id| id.to_string()),
+            "providerName": specialist.name,
+            "providerType": specialist.provider_type,
+            "platform": platform_as_str(platform)
+        }))
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let Some(event_id) = event_id else {
+            continue;
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO push_delivery_jobs (
+              notification_event_id, user_id, push_token, platform, payload
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(push_token)
+        .bind(platform_as_str(platform))
+        .bind(serde_json::json!({
+            "title": "ZooHelp: apoio especializado necessario",
+            "body": format!("{} em {} precisa de apoio especializado regional.", post.name, post.neighborhood),
+            "deeplink": format!("zoohelp://post/{}?action=specialist", post.id),
+            "postId": post.id,
+            "critical": true,
+            "phase": phase.phase,
+            "strategy": phase.strategy
+        }))
+        .execute(&mut **tx)
+        .await?;
+        contacted += 1;
+    }
+
+    Ok(contacted)
 }
 
 async fn persist_rescue_alert_tx(
@@ -721,6 +980,213 @@ async fn ranked_candidates(
     Ok(candidates)
 }
 
+async fn ranked_specialist_candidates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    post: &Post,
+    phase: EscalationPhase,
+    scopes: &[String],
+) -> Result<Vec<SpecialistCandidate>, sqlx::Error> {
+    let lat_delta = phase.radius_km / EARTH_KM_PER_DEGREE;
+    let lng_delta = longitude_delta_for_radius(post.latitude, phase.radius_km);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          sp.id,
+          sp.user_id,
+          sp.name,
+          sp.provider_type,
+          sp.lat,
+          sp.lng,
+          sp.service_radius_km::float8 AS service_radius_km,
+          sp.phone,
+          sp.email,
+          sp.verified,
+          ps.push_token,
+          ps.platform,
+          ps.updated_at,
+          u.trust_score,
+          u.account_type::text AS account_type,
+          u.verified AS user_verified
+        FROM rescue_specialist_providers sp
+        LEFT JOIN users u ON u.id = sp.user_id AND u.deleted_at IS NULL
+        LEFT JOIN LATERAL (
+          SELECT push_token, platform, updated_at
+          FROM push_subscriptions ps
+          WHERE ps.user_id = sp.user_id
+          ORDER BY ps.updated_at DESC
+          LIMIT 1
+        ) ps ON true
+        WHERE sp.active = true
+          AND sp.lat IS NOT NULL
+          AND sp.lng IS NOT NULL
+          AND sp.lat BETWEEN $1 AND $2
+          AND sp.lng BETWEEN $3 AND $4
+          AND (
+            sp.animal_scopes && $5::text[]
+            OR sp.animal_scopes @> ARRAY['general']::text[]
+          )
+        "#,
+    )
+    .bind(post.latitude - lat_delta)
+    .bind(post.latitude + lat_delta)
+    .bind(post.longitude - lng_delta)
+    .bind(post.longitude + lng_delta)
+    .bind(scopes)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let lat: f64 = row.get("lat");
+        let lng: f64 = row.get("lng");
+        let distance = haversine_km(post.latitude, post.longitude, lat, lng);
+        let service_radius: f64 = row.get("service_radius_km");
+        if distance > phase.radius_km || distance > service_radius {
+            continue;
+        }
+
+        let provider_type: String = row.get("provider_type");
+        let trust_score = row.get::<Option<i16>, _>("trust_score").unwrap_or(50);
+        let account_type = row
+            .get::<Option<String>, _>("account_type")
+            .unwrap_or_else(|| provider_type.clone());
+        let verified = row.get::<bool, _>("verified")
+            || row.get::<Option<bool>, _>("user_verified").unwrap_or(false);
+        let push_token = row.get::<Option<String>, _>("push_token");
+        let platform = row
+            .get::<Option<String>, _>("platform")
+            .as_deref()
+            .map(push_platform_from_str);
+        let updated_at = row.get::<Option<DateTime<Utc>>, _>("updated_at");
+        let score = specialist_score(
+            distance,
+            phase.radius_km,
+            trust_score,
+            &account_type,
+            &provider_type,
+            verified,
+            updated_at,
+        );
+
+        candidates.push(SpecialistCandidate {
+            provider_id: row.get("id"),
+            user_id: row.get("user_id"),
+            name: row.get("name"),
+            provider_type,
+            push_token,
+            platform,
+            distance_km: round_distance_km(distance),
+            score,
+            contactable: row.get::<Option<String>, _>("phone").is_some()
+                || row.get::<Option<String>, _>("email").is_some(),
+        });
+    }
+
+    if candidates.is_empty() {
+        candidates = ranked_verified_regional_fallback(tx, post, phase).await?;
+    }
+
+    candidates.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.distance_km.total_cmp(&b.distance_km))
+    });
+    candidates.truncate(MAX_SPECIALIST_CANDIDATES_PER_ATTEMPT);
+    Ok(candidates)
+}
+
+async fn ranked_verified_regional_fallback(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    post: &Post,
+    phase: EscalationPhase,
+) -> Result<Vec<SpecialistCandidate>, sqlx::Error> {
+    let capped_radius = phase.radius_km.min(50.0);
+    let lat_delta = capped_radius / EARTH_KM_PER_DEGREE;
+    let lng_delta = longitude_delta_for_radius(post.latitude, capped_radius);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          ps.user_id,
+          ps.push_token,
+          ps.platform,
+          ps.lat,
+          ps.lng,
+          ps.updated_at,
+          u.name,
+          u.trust_score,
+          u.verified,
+          u.account_type::text AS account_type,
+          (
+            SELECT count(*)::int
+            FROM notification_events ne
+            WHERE ne.user_id = ps.user_id
+              AND ne.kind IN ('rescue_alert', 'rescue_escalation')
+              AND ne.created_at > now() - interval '60 minutes'
+          ) AS recent_60m
+        FROM push_subscriptions ps
+        JOIN users u ON u.id = ps.user_id
+        WHERE u.deleted_at IS NULL
+          AND ps.updated_at > now() - interval '60 minutes'
+          AND ps.lat BETWEEN $1 AND $2
+          AND ps.lng BETWEEN $3 AND $4
+          AND (u.verified = true OR u.account_type IN ('ong', 'vet', 'admin'))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM notification_events ne
+            WHERE ne.user_id = ps.user_id
+              AND ne.dedupe_key = $5
+          )
+        "#,
+    )
+    .bind(post.latitude - lat_delta)
+    .bind(post.latitude + lat_delta)
+    .bind(post.longitude - lng_delta)
+    .bind(post.longitude + lng_delta)
+    .bind(format!("rescue-escalation:{}:{}", post.id, phase.phase))
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let distance = haversine_km(
+            post.latitude,
+            post.longitude,
+            row.get("lat"),
+            row.get("lng"),
+        );
+        if distance > capped_radius
+            || row.get::<i32, _>("recent_60m") >= MAX_RECENT_RESCUE_ALERTS_60M
+        {
+            continue;
+        }
+        let account_type: String = row.get("account_type");
+        let verified: bool = row.get("verified");
+        let trust_score: i16 = row.get("trust_score");
+        let updated_at: DateTime<Utc> = row.get("updated_at");
+        let score = specialist_score(
+            distance,
+            capped_radius,
+            trust_score,
+            &account_type,
+            "verified_fallback",
+            verified,
+            Some(updated_at),
+        );
+        candidates.push(SpecialistCandidate {
+            provider_id: None,
+            user_id: row.get("user_id"),
+            name: row.get("name"),
+            provider_type: account_type,
+            push_token: row.get("push_token"),
+            platform: Some(push_platform_from_str(row.get::<&str, _>("platform"))),
+            distance_km: round_distance_km(distance),
+            score,
+            contactable: true,
+        });
+    }
+    Ok(candidates)
+}
+
 fn alert_for_candidates(
     post: &Post,
     phase: FanoutPhase,
@@ -807,6 +1273,123 @@ fn candidate_score(
         + verified_bonus
         + critical_bonus
         - fatigue_penalty
+}
+
+fn specialist_score(
+    distance_km: f64,
+    radius_km: f64,
+    trust_score: i16,
+    account_type: &str,
+    provider_type: &str,
+    verified: bool,
+    updated_at: Option<DateTime<Utc>>,
+) -> f64 {
+    let distance_score = (1.0 - (distance_km / radius_km).clamp(0.0, 1.0)) * 35.0;
+    let trust_score = (trust_score as f64).clamp(0.0, 100.0) / 4.0;
+    let provider_bonus = match provider_type {
+        "cetas" | "ibama" | "environmental_police" => 35.0,
+        "wildlife_rescue" | "marine_rescue" | "rural_rescue" => 28.0,
+        "ong" | "vet" => 22.0,
+        _ => 8.0,
+    };
+    let role_bonus = match account_type {
+        "ong" | "vet" | "admin" => 10.0,
+        _ => 0.0,
+    };
+    let verified_bonus = if verified { 15.0 } else { 0.0 };
+    let recent_bonus = updated_at
+        .map(|updated_at| {
+            let age_minutes = (Utc::now() - updated_at).num_minutes();
+            if age_minutes <= 15 {
+                12.0
+            } else if age_minutes <= 60 {
+                6.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    distance_score + trust_score + provider_bonus + role_bonus + verified_bonus + recent_bonus
+}
+
+fn animal_scopes_for_post(post: &Post) -> Vec<String> {
+    let haystack = format!(
+        "{} {} {} {}",
+        post.name,
+        post.description,
+        post.breed,
+        post.tags.join(" ")
+    )
+    .to_lowercase();
+
+    let mut scopes = vec!["general".to_string()];
+    match post.animal_type {
+        AnimalType::Dog => scopes.push("dog".to_string()),
+        AnimalType::Cat => scopes.push("cat".to_string()),
+        AnimalType::Other => scopes.push("other".to_string()),
+    }
+
+    for (scope, needles) in [
+        (
+            "wildlife",
+            &[
+                "silvestre",
+                "selvagem",
+                "macaco",
+                "mico",
+                "gambá",
+                "gamba",
+                "capivara",
+                "tamanduá",
+                "tamandua",
+                "cervo",
+                "veado",
+                "jacaré",
+                "jacare",
+                "cobra",
+                "lagarto",
+                "raposa",
+            ][..],
+        ),
+        (
+            "bird",
+            &[
+                "ave", "passaro", "pássaro", "coruja", "gavião", "gaviao", "papagaio", "arara",
+                "pombo",
+            ][..],
+        ),
+        (
+            "marine",
+            &[
+                "marinho",
+                "praia",
+                "oleado",
+                "tartaruga",
+                "pinguim",
+                "golfinho",
+                "baleia",
+            ][..],
+        ),
+        (
+            "livestock",
+            &[
+                "cavalo", "égua", "egua", "boi", "vaca", "bezerro", "burro", "mula", "porco",
+            ][..],
+        ),
+        (
+            "reptile",
+            &["jacaré", "jacare", "cobra", "serpente", "lagarto", "iguana"][..],
+        ),
+    ] {
+        if needles.iter().any(|needle| haystack.contains(needle)) {
+            scopes.push(scope.to_string());
+        }
+    }
+
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 async fn count_responses(
@@ -926,6 +1509,13 @@ async fn complete_state(
 
 fn phase_for(current_phase: i32) -> Option<FanoutPhase> {
     FANOUT_PHASES
+        .iter()
+        .copied()
+        .find(|phase| phase.phase == current_phase)
+}
+
+fn escalation_phase_for(current_phase: i32) -> Option<EscalationPhase> {
+    ESCALATION_PHASES
         .iter()
         .copied()
         .find(|phase| phase.phase == current_phase)
