@@ -128,6 +128,8 @@ fn db_ong_select_sql(where_clause: &str) -> String {
         SELECT
           op.id,
           op.legal_name,
+          u.email,
+          u.avatar_url,
           op.mission,
           op.city,
           op.state,
@@ -139,6 +141,7 @@ fn db_ong_select_sql(where_clause: &str) -> String {
           op.created_at,
           COALESCE(active_cases.count, 0)::int AS active_cases
         FROM ong_profiles op
+        JOIN users u ON u.id = op.user_id
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS count
           FROM posts p
@@ -175,7 +178,9 @@ fn row_to_ong(row: sqlx::postgres::PgRow) -> Ong {
     Ong {
         id: row.get::<Uuid, _>("id").to_string(),
         name: name.clone(),
+        email: row.get("email"),
         short_name,
+        avatar_url: row.get("avatar_url"),
         description: row
             .get::<Option<String>, _>("mission")
             .unwrap_or_else(|| "ONG verificada na rede ZooHelp.".into()),
