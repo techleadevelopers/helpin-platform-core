@@ -171,6 +171,11 @@ pub struct LikeResponse {
     pub liked: bool,
 }
 
+#[derive(Serialize)]
+pub struct DeletePostResponse {
+    pub status: &'static str,
+}
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct CommentRequest {
     #[validate(length(min = 1, max = 2000))]
@@ -539,6 +544,44 @@ pub async fn get_post(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+pub async fn delete_post(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DeletePostResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+
+    let row = sqlx::query("SELECT author_id FROM posts WHERE id = $1")
+        .bind(post_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let author_id: Uuid = row.get("author_id");
+    if author_id != user_id && !matches!(claims.account_type, AccountType::Admin) {
+        return Err(ApiError::Forbidden);
+    }
+
+    let deleted = sqlx::query("DELETE FROM posts WHERE id = $1")
+        .bind(post_id)
+        .execute(&state.db)
+        .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    audit_event(
+        &state,
+        Some(user_id),
+        "post.deleted",
+        serde_json::json!({ "postId": post_id }),
+    )
+    .await;
+
+    Ok(Json(DeletePostResponse { status: "deleted" }))
 }
 
 pub async fn toggle_like(
