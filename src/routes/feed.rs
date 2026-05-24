@@ -10,11 +10,12 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use sqlx::Row;
+use uuid::Uuid;
 
 use crate::{
     domain::{AccountType, Author, Post, PostType, RescueOperationalSummary},
     error::ApiError,
-    routes::posts::{animal_type_from_str, post_type_as_str, post_type_from_str},
+    routes::posts::{animal_type_from_str, load_post_media, post_type_as_str, post_type_from_str},
     state::AppState,
 };
 
@@ -275,7 +276,7 @@ pub(crate) async fn load_db_posts(
         .fetch_all(&state.db)
         .await?;
 
-    Ok(rows
+    let mut posts: Vec<Post> = rows
         .into_iter()
         .map(|row| {
             let author_type = match row.get::<&str, _>("author_type") {
@@ -319,7 +320,21 @@ pub(crate) async fn load_db_posts(
                 rescue_operational: rescue_operational_from_row(&row),
             }
         })
-        .collect())
+        .collect();
+
+    let post_ids: Vec<Uuid> = posts
+        .iter()
+        .filter_map(|post| Uuid::parse_str(&post.id).ok())
+        .collect();
+    let mut media_by_post = load_post_media(&state, &post_ids).await?;
+    for post in &mut posts {
+        post.images = media_by_post.remove(&post.id).unwrap_or_default();
+        if post.image.is_none() {
+            post.image = post.images.first().map(|image| image.url.clone());
+        }
+    }
+
+    Ok(posts)
 }
 
 fn rescue_operational_from_row(row: &sqlx::postgres::PgRow) -> Option<RescueOperationalSummary> {
@@ -336,6 +351,10 @@ fn rescue_operational_from_row(row: &sqlx::postgres::PgRow) -> Option<RescueOper
             "1 pessoa a caminho".to_string()
         } else if going > 1 {
             format!("{going} pessoas a caminho")
+        } else if fanout_phase >= 9 {
+            "Acionando apoio ambiental".to_string()
+        } else if fanout_phase >= 6 {
+            "Buscando apoio regional".to_string()
         } else {
             "Precisa de ajuda".to_string()
         },
