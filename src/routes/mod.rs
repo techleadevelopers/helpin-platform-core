@@ -83,7 +83,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/feed", get(feed::list_feed))
         .route("/v1/feed/ws", get(feed::feed_ws))
         .route("/v1/posts", post(posts::create_post))
-        .route("/v1/posts/:id", get(posts::get_post).delete(posts::delete_post))
+        .route(
+            "/v1/posts/:id",
+            get(posts::get_post).delete(posts::delete_post),
+        )
         .route("/v1/posts/:id/like", post(posts::toggle_like))
         .route(
             "/v1/posts/:id/comments",
