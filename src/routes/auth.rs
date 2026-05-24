@@ -89,6 +89,15 @@ pub struct PasswordResetRequest {
     pub email: String,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmPasswordResetRequest {
+    #[validate(length(min = 20, max = 120))]
+    pub token: String,
+    #[validate(length(min = 8, max = 256))]
+    pub password: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct VerifyEmailQuery {
     pub token: String,
@@ -260,8 +269,86 @@ pub async fn request_password_reset(
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    rate_limit::check_key(
+        &state,
+        &format!("auth:password-reset:{}", payload.email.to_lowercase()),
+        3,
+        StdDuration::from_secs(15 * 60),
+    )
+    .await?;
     queue_password_reset(&state, &payload.email).await;
     Ok(Json(ActionQueuedResponse { status: "queued" }))
+}
+
+pub async fn confirm_password_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<ConfirmPasswordResetRequest>,
+) -> Result<Json<ActionQueuedResponse>, ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+    rate_limit::check_key(
+        &state,
+        "auth:password-reset-confirm",
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+
+    let password_hash = auth_service::hash_password(&payload.password).map_err(|error| {
+        tracing::error!(?error, "password reset hashing failed");
+        ApiError::Internal
+    })?;
+
+    let mut tx = state.db.begin().await?;
+    let row = sqlx::query(
+        r#"
+        UPDATE password_reset_tokens
+        SET used_at = now()
+        WHERE token = $1
+          AND used_at IS NULL
+          AND expires_at > now()
+        RETURNING user_id
+        "#,
+    )
+    .bind(payload.token.trim())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Err(ApiError::Unauthorized);
+    };
+    let user_id: Uuid = row.get("user_id");
+
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = $1
+        WHERE id = $2
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(&password_hash)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    audit_event(
+        &state,
+        Some(user_id),
+        "auth.password_reset.confirmed",
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(ActionQueuedResponse { status: "updated" }))
 }
 
 pub async fn verify_email(
