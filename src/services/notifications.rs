@@ -234,6 +234,7 @@ pub async fn upsert_persistent_subscription(
     Ok(count as usize)
 }
 
+#[allow(dead_code)]
 pub async fn dispatch_persistent_rescue_alert(
     db: &PgPool,
     post: &Post,
@@ -340,6 +341,7 @@ async fn build_persistent_rescue_alert(
     })
 }
 
+#[allow(dead_code)]
 pub async fn persist_rescue_alert(db: &PgPool, alert: &RescueAlert) -> Result<(), sqlx::Error> {
     if alert.recipients.is_empty() {
         sqlx::query(
