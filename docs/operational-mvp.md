@@ -20,8 +20,10 @@ The operational loop is intentionally direct:
 vulnerable animal
 -> user posts photo, description, urgency, and location
 -> backend validates geolocation and classifies emergency intent
--> nearby NGOs, volunteers, and trusted community members are selected
--> push notification is sent with high urgency and a deep link
+-> durable fanout state starts at phase 1
+-> nearby NGOs, volunteers, and trusted community members are selected by operational score
+-> push notification jobs are created with high urgency and a deep link
+-> confirmed helper response pauses aggressive expansion
 -> people coordinate through the post, map action, and chat
 -> the case receives an outcome
 ```
@@ -30,14 +32,52 @@ The push layer must behave like targeted emergency fanout, not generic social en
 
 - send fast after the rescue post is committed
 - prefer very nearby subscribers over broad broadcast
-- use a phase-1 urgent rescue radius of `30 m`
+- use a phase-1 urgent rescue radius of `300 m`
+- expand progressively only while nobody confirmed `Estou indo`
 - respect each subscriber's configured radius
 - use critical-alert opt-in for urgent/emergency delivery
 - deduplicate by rescue case
+- respect fatigue/cooldown to avoid alert spam
 - include a direct deep link to route or chat
-- measure delivery queue age, failures, and response time
+- measure fanout phase, queue age, failures, and response time
 
 This turns geolocation and notification delivery into the core operating system for local animal rescue.
+
+## Progressive Fanout MVP
+
+The production MVP uses progressive operational fanout instead of one fixed-radius blast.
+
+| Phase | Radius / Target | Delay | Intent |
+|-------|-----------------|-------|--------|
+| 1 | `0.3 km` | `90s` | sniper local, recent/critical-alert users |
+| 2 | `0.7 km` | `120s` | expand if no one confirmed |
+| 3 | `1.0 km` | `180s` | neighborhood response |
+| 4 | `3.0 km` | `300s` | broader nearby response |
+| 5 | ONG/verified/provider | `300s` | escalation to trusted actors |
+
+Candidate ranking must optimize for expected response, not only proximity:
+
+- distance from the rescue
+- recent app/subscription activity
+- user trust score when available
+- role bonus for ONG, provider, verified or volunteer
+- rescue history when available
+- critical-alert opt-in
+- fatigue penalty for too many recent alerts
+
+`Estou indo` is an operational response, not a resolution. It should create or update `rescue_responses`, increment the public helper count, and pause aggressive expansion. The case remains open until explicitly resolved, cancelled, or completed by the appropriate flow.
+
+Public labels should keep urgency alive:
+
+| State | Label |
+|-------|-------|
+| no confirmed helper | `Precisa de ajuda` |
+| one confirmed helper | `1 pessoa a caminho` |
+| multiple confirmed helpers | `{n} pessoas a caminho` |
+| someone arrived | `Ajuda no local` |
+| fallback active coordination | `Resgate em coordenacao` |
+
+Avoid labels such as `Em atendimento` for open cases because they can imply the problem is already covered.
 
 ## User Experience Flow
 
@@ -45,7 +85,7 @@ The emergency UX should stay minimal and operational:
 
 1. Primary feed action: `Acionar resgate agora`.
 2. Compose asks only for the essentials: photo, short description, GPS, and urgency.
-3. Backend creates the post and dispatches the targeted rescue alert.
+3. Backend creates the post and starts targeted fanout.
 4. The reporter lands on rescue status, not back on the generic feed.
 5. Recipients open the notification directly into the rescue case.
 6. The rescue case exposes two immediate actions: route and chat.
