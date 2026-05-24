@@ -11,10 +11,15 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    domain::{AccountType, AnimalType, Author, Post, PostMedia, PostType},
+    domain::{
+        AccountType, AnimalType, Author, Post, PostMedia, PostType, RescueOperationalSummary,
+    },
     error::ApiError,
     routes::auth::audit_event,
-    services::notifications::{dispatch_persistent_rescue_alert, RescueAlert},
+    services::notifications::RescueAlert,
+    services::rescue_fanout::{
+        create_fanout_state_for_post, upsert_rescue_response, RescueResponseRecord,
+    },
     services::{auth as auth_service, fraud, rate_limit},
     state::{AppState, FeedEvent},
 };
@@ -162,6 +167,7 @@ pub struct CreatePostResponse {
     pub moderation_status: &'static str,
     pub fraud_risk: u8,
     pub rescue_alert: Option<RescueAlert>,
+    pub rescue_fanout_state_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -216,6 +222,36 @@ pub struct ReportResponse {
     pub status: &'static str,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct RescuePostResponseRequest {
+    #[serde(default = "default_rescue_response_action")]
+    #[validate(length(min = 1, max = 40))]
+    pub action: String,
+    #[serde(default = "default_rescue_response_status")]
+    #[validate(length(min = 1, max = 40))]
+    pub status: String,
+    #[validate(range(min = -90.0, max = 90.0))]
+    pub lat: Option<f64>,
+    #[validate(range(min = -180.0, max = 180.0))]
+    pub lng: Option<f64>,
+    pub eta_seconds: Option<i32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescuePostResponseAck {
+    pub response: RescueResponseRecord,
+}
+
+fn default_rescue_response_action() -> String {
+    "going".to_string()
+}
+
+fn default_rescue_response_status() -> String {
+    "confirmed".to_string()
+}
+
 pub async fn create_post(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -257,6 +293,7 @@ pub async fn create_post(
                         moderation_status: "approved",
                         fraud_risk: 0,
                         rescue_alert: None,
+                        rescue_fanout_state_id: None,
                     }),
                 ));
             }
@@ -442,17 +479,22 @@ pub async fn create_post(
         tags,
         latitude,
         longitude,
+        rescue_operational: requires_geo_alert.then(|| RescueOperationalSummary {
+            fanout_phase: Some(1),
+            help_going_count: 0,
+            help_arrived_count: 0,
+            operational_label: "Precisa de ajuda".to_string(),
+        }),
     };
 
-    let rescue_alert = if requires_geo_alert {
-        let alert = dispatch_persistent_rescue_alert(&state.db, &post, 5.0).await?;
+    let rescue_fanout_state_id = if requires_geo_alert {
+        let state_id = create_fanout_state_for_post(&state.db, post_id, None).await?;
         tracing::info!(
             post_id = %post.id,
-            recipients = alert.recipients.len(),
-            critical = alert.critical,
-            "rescue alert queued"
+            fanout_state_id = %state_id,
+            "rescue fanout queued"
         );
-        Some(alert)
+        Some(state_id.to_string())
     } else {
         None
     };
@@ -465,7 +507,8 @@ pub async fn create_post(
             media: stored_media,
             moderation_status: "approved",
             fraud_risk: risk,
-            rescue_alert,
+            rescue_alert: None,
+            rescue_fanout_state_id,
         }),
     ))
 }
@@ -806,6 +849,67 @@ pub async fn report_post(
     ))
 }
 
+pub async fn rescue_response(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<RescuePostResponseRequest>,
+) -> Result<Json<RescuePostResponseAck>, ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+    if !matches!(
+        payload.action.as_str(),
+        "going" | "remote_support" | "unavailable"
+    ) {
+        return Err(ApiError::Validation(
+            "invalid rescue response action".into(),
+        ));
+    }
+    if !matches!(
+        payload.status.as_str(),
+        "confirmed" | "cancelled" | "arrived"
+    ) {
+        return Err(ApiError::Validation(
+            "invalid rescue response status".into(),
+        ));
+    }
+
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:rescue-response:{id}:{user_id}"),
+        state.config.throttle_limit * 3,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
+    let rescue_session_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM rescue_sessions WHERE post_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(post_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let response = upsert_rescue_response(
+        &state.db,
+        post_id,
+        rescue_session_id,
+        user_id,
+        &payload.action,
+        &payload.status,
+        payload.lat,
+        payload.lng,
+        payload.eta_seconds,
+    )
+    .await?;
+
+    Ok(Json(RescuePostResponseAck { response }))
+}
+
 fn broadcast_feed_event(state: &AppState, post: &Post) {
     let event = FeedEvent {
         post_id: post.id.clone(),
@@ -866,6 +970,9 @@ pub(crate) async fn load_post_by_id(
             p.tags,
             COALESCE(p.latitude, -23.5505) AS latitude,
             COALESCE(p.longitude, -46.6333) AS longitude,
+            fs.current_phase AS fanout_phase,
+            COALESCE(fs.confirmed_count, 0) AS help_going_count,
+            COALESCE(fs.arrived_count, 0) AS help_arrived_count,
             u.id::text AS author_id,
             u.name AS author_name,
             u.avatar_url AS author_avatar,
@@ -873,6 +980,7 @@ pub(crate) async fn load_post_by_id(
             u.account_type::text AS author_type
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
+        LEFT JOIN rescue_fanout_states fs ON fs.post_id = p.id
         WHERE p.id = $1
           AND p.moderation_status = 'approved'
           AND u.deleted_at IS NULL
@@ -924,8 +1032,29 @@ pub(crate) async fn load_post_by_id(
             tags: row.get("tags"),
             latitude: row.get("latitude"),
             longitude: row.get("longitude"),
+            rescue_operational: rescue_operational_from_row(&row),
         }
     }))
+}
+
+fn rescue_operational_from_row(row: &sqlx::postgres::PgRow) -> Option<RescueOperationalSummary> {
+    let phase = row.try_get::<Option<i32>, _>("fanout_phase").ok().flatten();
+    let going = row.try_get::<i32, _>("help_going_count").unwrap_or(0);
+    let arrived = row.try_get::<i32, _>("help_arrived_count").unwrap_or(0);
+    phase.map(|fanout_phase| RescueOperationalSummary {
+        fanout_phase: Some(fanout_phase),
+        help_going_count: going,
+        help_arrived_count: arrived,
+        operational_label: if arrived > 0 {
+            "Ajuda no local".to_string()
+        } else if going == 1 {
+            "1 pessoa a caminho".to_string()
+        } else if going > 1 {
+            format!("{going} pessoas a caminho")
+        } else {
+            "Precisa de ajuda".to_string()
+        },
+    })
 }
 
 fn report_severity(reason: &str, details: Option<&str>) -> &'static str {
