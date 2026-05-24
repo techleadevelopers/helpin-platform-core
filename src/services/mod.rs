@@ -6,4 +6,5 @@ pub mod geo;
 pub mod notifications;
 pub mod push_worker;
 pub mod rate_limit;
+pub mod rescue_fanout;
 pub mod trust;
