@@ -16,6 +16,8 @@ use crate::{
     },
     error::ApiError,
     routes::auth::audit_event,
+    routes::maps,
+    services::geo::haversine_km,
     services::notifications::RescueAlert,
     services::rescue_fanout::{
         create_fanout_state_for_post, upsert_rescue_response, RescueResponseRecord,
@@ -27,6 +29,7 @@ use crate::{
 const MAX_POST_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_CLIENT_SERVER_LOCATION_DRIFT_KM: f64 = 1.5;
 const ALLOWED_MEDIA_TYPES: &[&str] = &[
     "image/jpeg",
     "image/png",
@@ -133,6 +136,7 @@ pub struct CreatePostRequest {
     pub description: String,
     #[validate(length(min = 1, max = 180))]
     pub location: String,
+    pub location_address: Option<PostLocationAddress>,
     pub neighborhood: Option<String>,
     pub image: Option<String>,
     #[serde(default)]
@@ -144,6 +148,23 @@ pub struct CreatePostRequest {
     pub latitude: Option<f64>,
     #[validate(range(min = -180.0, max = 180.0))]
     pub longitude: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct PostLocationAddress {
+    #[validate(length(min = 1, max = 120))]
+    pub street: String,
+    #[validate(length(min = 1, max = 30))]
+    pub number: String,
+    #[validate(length(min = 1, max = 120))]
+    pub neighborhood: String,
+    #[validate(length(min = 1, max = 120))]
+    pub city: String,
+    #[validate(length(min = 2, max = 2))]
+    pub state: String,
+    #[validate(length(max = 120))]
+    pub complement: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,6 +273,104 @@ fn default_rescue_response_status() -> String {
     "confirmed".to_string()
 }
 
+struct ResolvedPostLocation {
+    label: String,
+    neighborhood: String,
+    latitude: f64,
+    longitude: f64,
+}
+
+impl PostLocationAddress {
+    fn normalized_state(&self) -> String {
+        self.state.trim().to_uppercase()
+    }
+
+    fn label(&self) -> String {
+        let street = format!("{}, {}", self.street.trim(), self.number.trim());
+        let city_state = format!("{}, {}", self.city.trim(), self.normalized_state());
+        let mut parts = vec![street, self.neighborhood.trim().to_string(), city_state];
+        if let Some(complement) = self
+            .complement
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            parts.insert(1, complement.to_string());
+        }
+        parts.join(", ")
+    }
+
+    fn validate_complete(&self) -> Result<(), ApiError> {
+        self.validate()
+            .map_err(|error| ApiError::Validation(error.to_string()))?;
+        if !self
+            .normalized_state()
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic())
+        {
+            return Err(ApiError::Validation(
+                "locationAddress.state must be a 2-letter UF".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn resolve_post_location(
+    state: &AppState,
+    payload: &CreatePostRequest,
+    requires_geo_alert: bool,
+) -> Result<ResolvedPostLocation, ApiError> {
+    if let Some(address) = payload.location_address.as_ref() {
+        address.validate_complete()?;
+        let label = address.label();
+        let geocoded = maps::geocode_address(state, &label).await?.ok_or_else(|| {
+            ApiError::Validation(
+                "could not geocode locationAddress; verify street, number, neighborhood, city and state"
+                    .into(),
+            )
+        })?;
+
+        if let (Some(client_lat), Some(client_lng)) = (payload.latitude, payload.longitude) {
+            let drift_km = haversine_km(
+                client_lat,
+                client_lng,
+                geocoded.latitude,
+                geocoded.longitude,
+            );
+            if drift_km > MAX_CLIENT_SERVER_LOCATION_DRIFT_KM {
+                return Err(ApiError::Validation(format!(
+                    "latitude/longitude do not match locationAddress; drift is {:.1} km",
+                    drift_km
+                )));
+            }
+        }
+
+        return Ok(ResolvedPostLocation {
+            label,
+            neighborhood: address.neighborhood.trim().to_string(),
+            latitude: geocoded.latitude,
+            longitude: geocoded.longitude,
+        });
+    }
+
+    if requires_geo_alert && (payload.latitude.is_none() || payload.longitude.is_none()) {
+        return Err(ApiError::Validation(
+            "latitude and longitude are required for emergency rescue alerts".into(),
+        ));
+    }
+
+    Ok(ResolvedPostLocation {
+        label: payload.location.clone(),
+        neighborhood: payload
+            .neighborhood
+            .clone()
+            .unwrap_or_else(|| payload.location.clone()),
+        latitude: payload.latitude.unwrap_or(-23.5505),
+        longitude: payload.longitude.unwrap_or(-46.6333),
+    })
+}
+
 pub async fn create_post(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -309,22 +428,18 @@ pub async fn create_post(
     let is_urgent = payload.urgent.unwrap_or(false);
     let post_type = payload.post_type.clone();
     let requires_geo_alert = is_urgent || post_type == PostType::Emergency;
-    if requires_geo_alert && (payload.latitude.is_none() || payload.longitude.is_none()) {
-        return Err(ApiError::Validation(
-            "latitude and longitude are required for emergency rescue alerts".into(),
-        ));
-    }
+    let resolved_location = resolve_post_location(&state, &payload, requires_geo_alert).await?;
 
     let name = payload.name.unwrap_or_else(|| "Publicacao".into());
     let breed = payload.breed.unwrap_or_default();
     let age = payload.age.unwrap_or_default();
     let description = payload.description;
-    let location = payload.location.clone();
-    let neighborhood = payload.neighborhood.unwrap_or(payload.location);
+    let location = resolved_location.label;
+    let neighborhood = resolved_location.neighborhood;
     let contact = payload.contact.unwrap_or_default();
     let tags = payload.tags.unwrap_or_default();
-    let latitude = payload.latitude.unwrap_or(-23.5505);
-    let longitude = payload.longitude.unwrap_or(-46.6333);
+    let latitude = resolved_location.latitude;
+    let longitude = resolved_location.longitude;
     let text_only = media.is_empty() && payload.image.is_none();
     let initial_rescue_status = if requires_geo_alert { "active" } else { "open" };
 
