@@ -94,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/posts/:id/report", post(posts::report_post))
         .route(
+            "/v1/posts/:id/rescue-response",
+            post(posts::rescue_response),
+        )
+        .route(
             "/v1/media/upload-intents",
             post(media::create_upload_intent),
         )
@@ -145,6 +149,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(rescue::end),
         )
         .route("/v1/rescue/active/:id/incident", post(rescue::incident))
+        .route("/v1/rescue/active/:id/responses", post(rescue::respond))
         .route("/v1/rescue/active/:id/ws", get(rescue::rescue_ws))
         .route("/v1/support/meta", get(support::meta))
         .route(
@@ -211,6 +216,7 @@ mod tests {
             sentry_dsn: None,
             otel_exporter_otlp_endpoint: None,
             push_worker_enabled: false,
+            rescue_fanout_worker_enabled: false,
             push_provider: "expo".into(),
             expo_access_token: None,
             throttle_ttl_seconds: 60,
@@ -434,8 +440,12 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(body["post"]["latitude"], -23.5505);
         assert_eq!(body["post"]["longitude"], -46.6333);
-        assert_eq!(body["rescueAlert"]["critical"], true);
-        assert_eq!(body["rescueAlert"]["radiusKm"], 0.03);
+        assert!(body["rescueFanoutStateId"].as_str().is_some());
+        assert_eq!(body["post"]["rescueOperational"]["fanoutPhase"], 1);
+        assert_eq!(
+            body["post"]["rescueOperational"]["operationalLabel"],
+            "Precisa de ajuda"
+        );
     }
 
     #[tokio::test]
