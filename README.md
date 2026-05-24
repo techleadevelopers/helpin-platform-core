@@ -123,18 +123,19 @@ The active rescue publication flow is intentionally linear.
 4. Emergency posts must include `latitude` and `longitude`.
 5. Rust creates the post contract.
 6. Fraud text scoring runs in the request path as a cheap deterministic signal.
-7. Rescue alert dispatch is triggered for urgent/emergency cases.
-8. Notification engine computes nearby recipients by distance.
-9. Alert payload includes title, body, image, coordinates, radius, critical flag, and deep-link actions.
-10. Feed/search/notifications expose the rescue case back to the app.
+7. Urgent/emergency cases create a durable `rescue_fanout_state`.
+8. The rescue fanout worker expands by operational phase and ranks nearby candidates.
+9. Push jobs are created through the existing durable notification infrastructure.
+10. `Estou indo` creates a real rescue response and pauses aggressive expansion.
+11. Feed/search/notifications expose the rescue case back to the app with operational status.
 
 Simplified:
 
-`mobile GPS -> post create -> validation -> rescue alert -> nearby recipients -> feed/chat coordination`
+`mobile GPS -> post create -> validation -> fanout state -> phased nearby push -> response -> feed/chat coordination`
 
 ## Operational Rescue Alert Model
 
-The current backend supports a production-shaped rescue alert contract.
+The current backend supports a production-shaped rescue coordination contract.
 
 Emergency posts require:
 
@@ -144,23 +145,33 @@ Emergency posts require:
 - description
 - location label
 
-When accepted, the backend generates a `rescueAlert` response:
+When accepted, the backend creates a durable fanout state and returns operational rescue metadata:
 
 ```json
 {
-  "critical": true,
-  "radiusKm": 0.03,
-  "lat": -23.5505,
-  "lng": -46.6333,
-  "actions": [
-    { "id": "go_to_location", "label": "Ir ao local" },
-    { "id": "remote_support", "label": "Apoiar remoto" }
-  ],
-  "recipients": []
+  "rescueFanoutStateId": "uuid",
+  "rescueOperational": {
+    "fanoutPhase": 1,
+    "helpGoingCount": 0,
+    "helpArrivedCount": 0,
+    "operationalLabel": "Precisa de ajuda"
+  }
 }
 ```
 
-The current in-memory `NotificationEngine` is suitable for contract validation and product integration. For large-scale production delivery, the next hardening step is connecting this engine to durable queues plus FCM/APNs delivery workers.
+The fanout worker is controlled by `RESCUE_FANOUT_WORKER_ENABLED`. It claims due fanout states with row locking, selects candidates using geo filters plus operational score, creates push jobs, records attempts, and pauses expansion when a real helper confirms `Estou indo`.
+
+MVP fanout phases:
+
+| Phase | Radius | Purpose |
+|-------|--------|---------|
+| 1 | `0.3 km` | sniper local, critical-alert users and recently active helpers |
+| 2 | `0.7 km` | controlled local expansion |
+| 3 | `1.0 km` | neighborhood expansion |
+| 4 | `3.0 km` | broader city-area expansion |
+| 5 | verified/ONG/provider escalation | include trusted institutional actors with wider radius |
+
+The old rescue alert preview endpoint remains useful for contract preview, but production delivery should use the persisted fanout state and durable push jobs.
 
 ## Core Backend Surface
 
@@ -181,6 +192,7 @@ Supports personal users, NGOs, and vet-style accounts at the frontend contract l
 - `POST /v1/posts/:id/like`
 - `POST /v1/posts/:id/comments`
 - `POST /v1/posts/:id/report`
+- `POST /v1/posts/:id/rescue-response`
 
 Posts support adoption, lost, found, emergency, campaign, and general community post types.
 
@@ -205,6 +217,13 @@ HTTP chat and WebSocket room path are present for real-time coordination.
 - `GET /v1/geo/nearby`
 
 Nearby logic is based on geographic distance and is aligned with rescue, feed, and map usage.
+
+### Rescue Coordination
+
+- `POST /v1/posts/:id/rescue-response`
+- `POST /v1/rescue/active/:id/responses`
+
+The response endpoint records helper intent such as `confirmed` or `arrived`. A confirmed response means someone is going, not that the case is resolved. The backend must not mark a post or rescue session as resolved from this action alone.
 
 ### Notifications
 
@@ -261,17 +280,23 @@ The practical decision model for rescue visibility is based on signals that can 
 - notification dedupe state
 - feed freshness and proximity
 
-The rescue alert radius is currently:
+The rescue alert radius is phase-based:
 
-- urgent/emergency phase-1 sniper push: `0.03 km` / `30 m`
-- default rescue preview: configurable default, currently `5 km`
-- hard clamp: `1 km` to `50 km`
+- phase 1 sniper local: `0.3 km`
+- phase 2: `0.7 km`
+- phase 3: `1.0 km`
+- phase 4: `3.0 km`
+- phase 5: verified/ONG/provider escalation with wider operational reach
+
+`30 m` may remain a technical lower bound for validation or preview paths, but it is not the operational phase-1 radius.
 
 Compact distance rule:
 
 ```math
-recipient\_eligible = distance(post, subscriber) <= min(alert\_radius, subscriber\_radius)
+recipient\_eligible = distance(post, subscriber) <= min(phase\_radius, subscriber\_radius)
 ```
+
+Candidate ordering is not distance-only. The worker ranks by expected operational response using proximity, recent activity, trust, role, verification, critical-alert preference, and fatigue/cooldown.
 
 ## Operational Evidence
 
@@ -286,17 +311,18 @@ Current local validation is based on automated tests and contract checks.
 - post validation
 - media upload contract
 - emergency coordinate requirement
-- emergency rescue alert dispatch
+- emergency rescue fanout state creation
 - geospatial distance calculations
 - notification recipient filtering
 - fraud scoring
 - trust scoring
 - JWT/password auth services
 
-Latest local result:
+Latest local result for the fanout integration:
 
 ```text
-21 passed; 0 failed
+cargo check passed
+cargo test compiled; route tests hit local DB pool timeout
 ```
 
 ### Mobile Contract Validation
@@ -456,6 +482,9 @@ AI_WORKER_URL
 JWT_SECRET
 ACCESS_TOKEN_TTL_MINUTES
 REFRESH_TOKEN_TTL_DAYS
+PUSH_WORKER_ENABLED
+RESCUE_FANOUT_WORKER_ENABLED
+POSTGIS_ENABLED
 ```
 
 Cloudinary media:
@@ -525,6 +554,8 @@ backend/
   docker-compose.yml
   migrations/
     0001_init.sql
+    ...
+    0018_rescue_fanout_progressive.sql
   src/
     main.rs
     config.rs
@@ -550,6 +581,7 @@ backend/
       fraud.rs
       geo.rs
       notifications.rs
+      rescue_fanout.rs
       rate_limit.rs
       trust.rs
   python-workers/
