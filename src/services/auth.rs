@@ -138,6 +138,7 @@ mod tests {
             sentry_dsn: None,
             otel_exporter_otlp_endpoint: None,
             push_worker_enabled: false,
+            rescue_fanout_worker_enabled: false,
             push_provider: "expo".into(),
             expo_access_token: None,
             throttle_ttl_seconds: 60,
