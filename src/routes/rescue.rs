@@ -18,7 +18,7 @@ use validator::Validate;
 use crate::{
     domain::AccountType,
     error::ApiError,
-    services::{auth as auth_service, rate_limit},
+    services::{auth as auth_service, rate_limit, rescue_fanout},
     state::{AppState, RescueEvent},
 };
 
@@ -86,6 +86,36 @@ pub struct IncidentResponse {
     pub id: String,
     pub rescue_id: String,
     pub status: &'static str,
+}
+
+#[derive(Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct RescueResponseRequest {
+    #[serde(default = "default_response_action")]
+    #[validate(length(min = 1, max = 40))]
+    pub action: String,
+    #[serde(default = "default_response_status")]
+    #[validate(length(min = 1, max = 40))]
+    pub status: String,
+    #[validate(range(min = -90.0, max = 90.0))]
+    pub lat: Option<f64>,
+    #[validate(range(min = -180.0, max = 180.0))]
+    pub lng: Option<f64>,
+    pub eta_seconds: Option<i32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescueResponseAck {
+    pub response: rescue_fanout::RescueResponseRecord,
+}
+
+fn default_response_action() -> String {
+    "going".to_string()
+}
+
+fn default_response_status() -> String {
+    "confirmed".to_string()
 }
 
 pub async fn list_active(
@@ -182,6 +212,8 @@ pub async fn trigger(
     }
     tx.commit().await?;
 
+    let rescue_uuid = Uuid::parse_str(&rescue.id).ok();
+    let _ = rescue_fanout::create_fanout_state_for_post(&state.db, post_id, rescue_uuid).await?;
     broadcast_rescue_event(&state, &rescue);
     Ok((StatusCode::CREATED, Json(RescueResponse { rescue })))
 }
@@ -342,6 +374,64 @@ pub async fn incident(
             status: "queued_review",
         }),
     ))
+}
+
+pub async fn respond(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<RescueResponseRequest>,
+) -> Result<Json<RescueResponseAck>, ApiError> {
+    payload
+        .validate()
+        .map_err(|error| ApiError::Validation(error.to_string()))?;
+    if !matches!(
+        payload.action.as_str(),
+        "going" | "remote_support" | "unavailable"
+    ) {
+        return Err(ApiError::Validation(
+            "invalid rescue response action".into(),
+        ));
+    }
+    if !matches!(
+        payload.status.as_str(),
+        "confirmed" | "cancelled" | "arrived"
+    ) {
+        return Err(ApiError::Validation(
+            "invalid rescue response status".into(),
+        ));
+    }
+    let user_id = authenticate_user(&state, &headers, None)?;
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:response:{id}:{user_id}"),
+        state.config.throttle_limit * 3,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+
+    let post_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT post_id FROM rescue_sessions WHERE id = $1 AND status = 'active'",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let response = rescue_fanout::upsert_rescue_response(
+        &state.db,
+        post_id,
+        Some(id),
+        user_id,
+        &payload.action,
+        &payload.status,
+        payload.lat,
+        payload.lng,
+        payload.eta_seconds,
+    )
+    .await?;
+
+    Ok(Json(RescueResponseAck { response }))
 }
 
 pub async fn rescue_ws(
