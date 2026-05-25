@@ -117,8 +117,23 @@ CREATE INDEX post_media_moderation_idx ON post_media (moderation_status, created
 CREATE TABLE chat_rooms (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   post_id uuid REFERENCES posts(id) ON DELETE SET NULL,
+  requester_id uuid REFERENCES users(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX chat_rooms_private_post_requester_idx
+  ON chat_rooms (post_id, requester_id)
+  WHERE post_id IS NOT NULL AND requester_id IS NOT NULL;
+
+CREATE TABLE chat_room_members (
+  room_id uuid NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  last_read_at timestamptz,
+  joined_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (room_id, user_id)
+);
+
+CREATE INDEX chat_room_members_user_idx ON chat_room_members (user_id, room_id);
 
 CREATE TABLE chat_messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
