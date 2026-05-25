@@ -49,7 +49,8 @@ pub struct ListRoomsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRoomRequest {
-    pub post_id: String,
+    pub post_id: Option<String>,
+    pub participant_id: Option<String>,
 }
 
 pub async fn list_rooms(
@@ -66,7 +67,7 @@ pub async fn list_rooms(
         SELECT
           r.id,
           COALESCE(r.post_id::text, '') AS post_id,
-          COALESCE(p.name, p.title, 'Caso ZooHelp') AS post_title,
+          COALESCE(p.name, p.title, 'Conversa direta') AS post_title,
           COALESCE(last_message.body, '') AS last_message,
           COALESCE(last_message.created_at, r.created_at) AS last_message_time,
           participant_user.id::text AS participant_id,
@@ -114,32 +115,82 @@ pub async fn open_room(
 ) -> Result<(StatusCode, Json<ChatConversation>), ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let requester_id = parse_claim_user_id(&claims)?;
-    let post_id = parse_uuid(&payload.post_id)?;
-    let author_id: Uuid = sqlx::query_scalar("SELECT author_id FROM posts WHERE id = $1")
-        .bind(post_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-
-    if requester_id == author_id {
-        return Err(ApiError::Validation("cannot open a chat with your own post".into()));
-    }
-
     let mut tx = state.db.begin().await?;
-    let room_id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO chat_rooms (post_id, requester_id)
-        VALUES ($1, $2)
-        ON CONFLICT (post_id, requester_id)
-          WHERE post_id IS NOT NULL AND requester_id IS NOT NULL
-        DO UPDATE SET requester_id = EXCLUDED.requester_id
-        RETURNING id
-        "#,
-    )
-    .bind(post_id)
-    .bind(requester_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let (room_id, participant_id) = match (
+        payload.post_id.as_deref(),
+        payload.participant_id.as_deref(),
+    ) {
+        (Some(post_id), None) => {
+            let post_id = parse_uuid(post_id)?;
+            let author_id: Uuid = sqlx::query_scalar("SELECT author_id FROM posts WHERE id = $1")
+                .bind(post_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+
+            if requester_id == author_id {
+                return Err(ApiError::Validation(
+                    "cannot open a chat with your own post".into(),
+                ));
+            }
+
+            let room_id: Uuid = sqlx::query_scalar(
+                r#"
+                INSERT INTO chat_rooms (post_id, requester_id)
+                VALUES ($1, $2)
+                ON CONFLICT (post_id, requester_id)
+                  WHERE post_id IS NOT NULL AND requester_id IS NOT NULL
+                DO UPDATE SET requester_id = EXCLUDED.requester_id
+                RETURNING id
+                "#,
+            )
+            .bind(post_id)
+            .bind(requester_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            (room_id, author_id)
+        }
+        (None, Some(participant_id)) => {
+            let participant_id = parse_uuid(participant_id)?;
+            if requester_id == participant_id {
+                return Err(ApiError::Validation(
+                    "cannot open a chat with yourself".into(),
+                ));
+            }
+
+            let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1")
+                .bind(participant_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            if exists.is_none() {
+                return Err(ApiError::NotFound);
+            }
+
+            let mut members = [requester_id.to_string(), participant_id.to_string()];
+            members.sort();
+            let direct_pair_key = members.join(":");
+            let room_id: Uuid = sqlx::query_scalar(
+                r#"
+                INSERT INTO chat_rooms (direct_pair_key)
+                VALUES ($1)
+                ON CONFLICT (direct_pair_key)
+                  WHERE direct_pair_key IS NOT NULL
+                DO UPDATE SET direct_pair_key = EXCLUDED.direct_pair_key
+                RETURNING id
+                "#,
+            )
+            .bind(direct_pair_key)
+            .fetch_one(&mut *tx)
+            .await?;
+            (room_id, participant_id)
+        }
+        _ => {
+            return Err(ApiError::Validation(
+                "provide exactly one of postId or participantId".into(),
+            ));
+        }
+    };
+
     sqlx::query(
         r#"
         INSERT INTO chat_room_members (room_id, user_id)
@@ -149,7 +200,7 @@ pub async fn open_room(
     )
     .bind(room_id)
     .bind(requester_id)
-    .bind(author_id)
+    .bind(participant_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -320,7 +371,7 @@ async fn load_room(
         SELECT
           r.id,
           COALESCE(r.post_id::text, '') AS post_id,
-          COALESCE(p.name, p.title, 'Caso ZooHelp') AS post_title,
+          COALESCE(p.name, p.title, 'Conversa direta') AS post_title,
           COALESCE(last_message.body, '') AS last_message,
           COALESCE(last_message.created_at, r.created_at) AS last_message_time,
           participant_user.id::text AS participant_id,
@@ -360,23 +411,29 @@ async fn load_room(
     Ok(row_to_conversation(row))
 }
 
-async fn ensure_room_member(state: &AppState, room_id: Uuid, user_id: Uuid) -> Result<(), ApiError> {
+async fn ensure_room_member(
+    state: &AppState,
+    room_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
     let exists: Option<Uuid> = sqlx::query_scalar(
         "SELECT room_id FROM chat_room_members WHERE room_id = $1 AND user_id = $2",
     )
-        .bind(room_id)
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(room_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
     exists.map(|_| ()).ok_or(ApiError::Forbidden)
 }
 
 async fn mark_room_read(state: &AppState, room_id: Uuid, user_id: Uuid) -> Result<(), ApiError> {
-    sqlx::query("UPDATE chat_room_members SET last_read_at = now() WHERE room_id = $1 AND user_id = $2")
-        .bind(room_id)
-        .bind(user_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE chat_room_members SET last_read_at = now() WHERE room_id = $1 AND user_id = $2",
+    )
+    .bind(room_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
     Ok(())
 }
 
