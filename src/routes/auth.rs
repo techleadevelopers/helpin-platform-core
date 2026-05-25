@@ -25,7 +25,6 @@ pub struct LoginRequest {
     #[validate(length(min = 8))]
     pub password: String,
 }
-
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterRequest {
