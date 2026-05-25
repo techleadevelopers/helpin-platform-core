@@ -74,7 +74,12 @@ pub fn router(state: AppState) -> Router {
             patch(admin::review_moderation_job),
         )
         .route("/v1/admin/reports/posts", get(admin::list_post_reports))
-        .route("/v1/me", get(auth::me).delete(auth::delete_account))
+        .route(
+            "/v1/me",
+            get(auth::me)
+                .patch(auth::update_profile)
+                .delete(auth::delete_account),
+        )
         .route("/v1/me/avatar", patch(auth::update_avatar))
         .route(
             "/v1/me/ong/kyb-documents",
@@ -101,7 +106,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/media/upload-intents",
             post(media::create_upload_intent),
         )
-        .route("/v1/chat/rooms", get(chat::list_rooms).post(chat::open_room))
+        .route(
+            "/v1/chat/rooms",
+            get(chat::list_rooms).post(chat::open_room),
+        )
         .route("/v1/chat/rooms/:id", get(chat::get_room))
         .route(
             "/v1/chat/rooms/:id/messages",
