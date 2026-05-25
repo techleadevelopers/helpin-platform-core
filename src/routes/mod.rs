@@ -101,7 +101,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/media/upload-intents",
             post(media::create_upload_intent),
         )
-        .route("/v1/chat/rooms", get(chat::list_rooms))
+        .route("/v1/chat/rooms", get(chat::list_rooms).post(chat::open_room))
         .route("/v1/chat/rooms/:id", get(chat::get_room))
         .route(
             "/v1/chat/rooms/:id/messages",
