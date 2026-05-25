@@ -1182,7 +1182,7 @@ pub(crate) async fn load_post_media(
             width,
             height,
             size_bytes,
-            moderation_status
+            moderation_status::text AS moderation_status
         FROM post_media
         WHERE post_id = ANY($1)
         ORDER BY post_id, sort_order ASC, created_at ASC
