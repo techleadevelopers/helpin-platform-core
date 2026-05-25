@@ -7,7 +7,10 @@
 .env.*
 !.env.example
 
-# Python caches and virtualenvs
+# Python auxiliary workers remain local until the AI service is enabled
+/python-workers/
+
+# Python caches and virtualenvs if created outside python-workers
 __pycache__/
 *.py[cod]
 *.pyo
