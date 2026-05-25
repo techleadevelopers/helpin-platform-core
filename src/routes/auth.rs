@@ -65,6 +65,7 @@ pub struct UserProfile {
     pub posts_count: u32,
     pub helped_count: u32,
     pub adoptions_count: u32,
+    pub profile_address: Option<ProfileAddress>,
 }
 
 #[derive(Serialize)]
@@ -120,6 +121,32 @@ pub struct UpdateAvatarRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAvatarResponse {
     pub avatar_url: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProfileRequest {
+    #[validate(length(min = 2, max = 120))]
+    pub name: String,
+    pub cep: Option<String>,
+    pub street: Option<String>,
+    pub number: Option<String>,
+    pub complement: Option<String>,
+    pub neighborhood: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileAddress {
+    pub cep: Option<String>,
+    pub street: Option<String>,
+    pub number: Option<String>,
+    pub complement: Option<String>,
+    pub neighborhood: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -490,6 +517,92 @@ pub async fn update_avatar(
     }))
 }
 
+pub async fn update_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateProfileRequest>,
+) -> Result<Json<CurrentUserResponse>, ApiError> {
+    payload
+        .validate()
+        .map_err(|error| ApiError::Validation(error.to_string()))?;
+
+    let state_code = normalize_optional(payload.state.as_deref()).map(|value| value.to_uppercase());
+    if state_code
+        .as_deref()
+        .is_some_and(|value| value.chars().count() != 2)
+    {
+        return Err(ApiError::Validation("state must be a 2-letter UF".into()));
+    }
+
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let name = payload.name.trim().to_string();
+    let cep = normalize_optional(payload.cep.as_deref());
+    let street = normalize_optional(payload.street.as_deref());
+    let number = normalize_optional(payload.number.as_deref());
+    let complement = normalize_optional(payload.complement.as_deref());
+    let neighborhood = normalize_optional(payload.neighborhood.as_deref());
+    let city = normalize_optional(payload.city.as_deref());
+
+    let mut tx = state.db.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE users
+        SET name = $2, cep = $3, street = $4, number = $5, complement = $6,
+            neighborhood = $7, city = $8, state = $9
+        WHERE id = $1
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .bind(&name)
+    .bind(cep.as_deref())
+    .bind(street.as_deref())
+    .bind(number.as_deref())
+    .bind(complement.as_deref())
+    .bind(neighborhood.as_deref())
+    .bind(city.as_deref())
+    .bind(state_code.as_deref())
+    .execute(&mut *tx)
+    .await?;
+
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE ong_profiles
+        SET legal_name = $2, cep = $3, street = $4, number = $5, complement = $6,
+            neighborhood = $7, city = $8, state = $9
+        WHERE user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .bind(&name)
+    .bind(cep.as_deref())
+    .bind(street.as_deref())
+    .bind(number.as_deref())
+    .bind(complement.as_deref())
+    .bind(neighborhood.as_deref())
+    .bind(city.as_deref())
+    .bind(state_code.as_deref())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let record = find_user_by_id(&state, user_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let ong_record = if matches!(record.account_type, AccountType::Ong) {
+        find_ong_by_user_id(&state, user_id).await?
+    } else {
+        None
+    };
+
+    Ok(Json(current_user_response(record, ong_record)))
+}
+
 #[derive(Debug)]
 struct UserRecord {
     id: Uuid,
@@ -500,6 +613,13 @@ struct UserRecord {
     account_type: AccountType,
     verified: bool,
     gender: Option<String>,
+    cep: Option<String>,
+    street: Option<String>,
+    number: Option<String>,
+    complement: Option<String>,
+    neighborhood: Option<String>,
+    city: Option<String>,
+    state: Option<String>,
 }
 
 #[derive(Debug)]
@@ -525,7 +645,8 @@ async fn find_user_by_email(
 ) -> Result<Option<UserRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender
+        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender,
+               cep, street, number, complement, neighborhood, city, state
         FROM users
         WHERE email = $1
         "#,
@@ -540,7 +661,8 @@ async fn find_user_by_email(
 async fn find_user_by_id(state: &AppState, id: Uuid) -> Result<Option<UserRecord>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender
+        SELECT id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender,
+               cep, street, number, complement, neighborhood, city, state
         FROM users
         WHERE id = $1
         "#,
@@ -563,9 +685,13 @@ async fn insert_user_with_optional_ong(
     let user_id = Uuid::now_v7();
     let row = sqlx::query(
         r#"
-        INSERT INTO users (id, name, email, avatar_url, password_hash, account_type, gender)
-        VALUES ($1, $2, $3, $4, $5, $6::account_type, $7)
-        RETURNING id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender
+        INSERT INTO users (
+          id, name, email, avatar_url, password_hash, account_type, gender,
+          cep, street, number, complement, neighborhood, city, state
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::account_type, $7, $8, $9, $10, $11, $12, $13, $14)
+        RETURNING id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender,
+                  cep, street, number, complement, neighborhood, city, state
         "#,
     )
     .bind(user_id)
@@ -575,6 +701,13 @@ async fn insert_user_with_optional_ong(
     .bind(password_hash)
     .bind(account_type_str)
     .bind(normalize_gender(payload.gender.as_deref()))
+    .bind(payload.cep.as_deref())
+    .bind(payload.street.as_deref())
+    .bind(payload.number.as_deref())
+    .bind(payload.complement.as_deref())
+    .bind(payload.neighborhood.as_deref())
+    .bind(payload.city.as_deref())
+    .bind(payload.state.as_deref())
     .fetch_one(&mut *tx)
     .await?;
 
@@ -681,6 +814,13 @@ fn row_to_user_record(row: sqlx::postgres::PgRow) -> UserRecord {
         account_type: auth_service::account_type_from_str(row.get::<&str, _>("account_type")),
         verified: row.get("verified"),
         gender: row.get("gender"),
+        cep: row.get("cep"),
+        street: row.get("street"),
+        number: row.get("number"),
+        complement: row.get("complement"),
+        neighborhood: row.get("neighborhood"),
+        city: row.get("city"),
+        state: row.get("state"),
     }
 }
 
@@ -812,6 +952,7 @@ async fn issue_auth_response(
         ApiError::Internal
     })?;
 
+    let profile_address = profile_address_from_record(&record);
     Ok(auth_response(
         &record.id.to_string(),
         &record.name,
@@ -820,6 +961,7 @@ async fn issue_auth_response(
         record.account_type,
         record.verified,
         record.gender,
+        profile_address,
         ong_record,
         access_token,
         refresh_token,
@@ -851,6 +993,7 @@ fn issue_fallback_response(
         account_type,
         false,
         gender,
+        None,
         ong_record,
         access_token,
         auth_service::new_refresh_token(),
@@ -865,6 +1008,7 @@ fn auth_response(
     account_type: AccountType,
     verified: bool,
     gender: Option<String>,
+    profile_address: Option<ProfileAddress>,
     ong_record: Option<OngRecord>,
     access_token: String,
     refresh_token: String,
@@ -891,6 +1035,7 @@ fn auth_response(
             posts_count: 0,
             helped_count: 0,
             adoptions_count: 0,
+            profile_address,
         },
         ong_profile: ong_record.map(|record| OngRegistrationProfile {
             legal_name: record.legal_name,
@@ -923,6 +1068,8 @@ fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> C
         record.verified
     };
 
+    let profile_address = profile_address_from_record(&record);
+
     CurrentUserResponse {
         user: UserProfile {
             id: record.id.to_string(),
@@ -936,6 +1083,7 @@ fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> C
             posts_count: 0,
             helped_count: 0,
             adoptions_count: 0,
+            profile_address,
         },
         ong_profile: ong_record.map(|record| OngRegistrationProfile {
             legal_name: record.legal_name,
@@ -953,6 +1101,40 @@ fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> C
             verification_status: record.verification_status,
         }),
     }
+}
+
+fn profile_address_from_record(record: &UserRecord) -> Option<ProfileAddress> {
+    if [
+        record.cep.as_ref(),
+        record.street.as_ref(),
+        record.number.as_ref(),
+        record.complement.as_ref(),
+        record.neighborhood.as_ref(),
+        record.city.as_ref(),
+        record.state.as_ref(),
+    ]
+    .iter()
+    .all(|value| value.is_none())
+    {
+        return None;
+    }
+
+    Some(ProfileAddress {
+        cep: record.cep.clone(),
+        street: record.street.clone(),
+        number: record.number.clone(),
+        complement: record.complement.clone(),
+        neighborhood: record.neighborhood.clone(),
+        city: record.city.clone(),
+        state: record.state.clone(),
+    })
+}
+
+fn normalize_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn validate_ong_payload(
