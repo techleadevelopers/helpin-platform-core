@@ -110,6 +110,8 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx ON posts (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
         "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES users(id) ON DELETE CASCADE;",
         "CREATE UNIQUE INDEX IF NOT EXISTS chat_rooms_private_post_requester_idx ON chat_rooms (post_id, requester_id) WHERE post_id IS NOT NULL AND requester_id IS NOT NULL;",
+        "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS direct_pair_key text;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS chat_rooms_direct_pair_idx ON chat_rooms (direct_pair_key) WHERE direct_pair_key IS NOT NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS chat_room_members (
           room_id uuid NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
