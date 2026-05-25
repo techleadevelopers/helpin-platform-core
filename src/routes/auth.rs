@@ -17,7 +17,6 @@ use crate::{
     services::{auth as auth_service, rate_limit},
     state::AppState,
 };
-
 #[derive(Debug, Deserialize, Validate)]
 pub struct LoginRequest {
     #[validate(email)]
