@@ -7,10 +7,7 @@
 .env.*
 !.env.example
 
-# Python auxiliary workers must not be committed
-/python-workers/
-
-# Python caches and virtualenvs if created outside python-workers
+# Python caches and virtualenvs
 __pycache__/
 *.py[cod]
 *.pyo
