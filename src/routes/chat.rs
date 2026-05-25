@@ -46,6 +46,12 @@ pub struct ListRoomsQuery {
     pub post_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRoomRequest {
+    pub post_id: String,
+}
+
 pub async fn list_rooms(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -63,13 +69,17 @@ pub async fn list_rooms(
           COALESCE(p.name, p.title, 'Caso ZooHelp') AS post_title,
           COALESCE(last_message.body, '') AS last_message,
           COALESCE(last_message.created_at, r.created_at) AS last_message_time,
-          COALESCE(participant_user.id, r.post_id)::text AS participant_id,
+          participant_user.id::text AS participant_id,
           COALESCE(participant_user.name, 'ZooHelp') AS participant_name,
           participant_user.avatar_url AS participant_avatar,
           COALESCE(participant_user.verified, false) AS participant_verified,
-          COALESCE(participant_user.account_type::text, 'person') AS participant_type
+          COALESCE(participant_user.account_type::text, 'person') AS participant_type,
+          COALESCE(unread_messages.count, 0)::bigint AS unread
         FROM chat_rooms r
         LEFT JOIN posts p ON p.id = r.post_id
+        INNER JOIN chat_room_members me ON me.room_id = r.id AND me.user_id = $2
+        INNER JOIN chat_room_members peer ON peer.room_id = r.id AND peer.user_id <> $2
+        INNER JOIN users participant_user ON participant_user.id = peer.user_id
         LEFT JOIN LATERAL (
           SELECT body, created_at
           FROM chat_messages
@@ -78,26 +88,13 @@ pub async fn list_rooms(
           LIMIT 1
         ) last_message ON true
         LEFT JOIN LATERAL (
-          SELECT sender_id
+          SELECT count(*) AS count
           FROM chat_messages
-          WHERE room_id = r.id AND sender_id <> $2
-          ORDER BY created_at DESC
-          LIMIT 1
-        ) other_sender ON true
-        LEFT JOIN users participant_user ON participant_user.id = CASE
-          WHEN p.author_id = $2 THEN other_sender.sender_id
-          ELSE p.author_id
-        END
-        WHERE (
-          ($1::uuid IS NOT NULL AND r.post_id = $1)
-          OR ($1::uuid IS NULL AND (
-            p.author_id = $2
-            OR EXISTS (
-              SELECT 1 FROM chat_messages mine
-              WHERE mine.room_id = r.id AND mine.sender_id = $2
-            )
-          ))
-        )
+          WHERE room_id = r.id
+            AND sender_id <> $2
+            AND created_at > COALESCE(me.last_read_at, '-infinity'::timestamptz)
+        ) unread_messages ON true
+        WHERE ($1::uuid IS NULL OR r.post_id = $1)
         ORDER BY COALESCE(last_message.created_at, r.created_at) DESC
         LIMIT 100
         "#,
@@ -108,6 +105,57 @@ pub async fn list_rooms(
     .await?;
 
     Ok(Json(rows.into_iter().map(row_to_conversation).collect()))
+}
+
+pub async fn open_room(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<OpenRoomRequest>,
+) -> Result<(StatusCode, Json<ChatConversation>), ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let requester_id = parse_claim_user_id(&claims)?;
+    let post_id = parse_uuid(&payload.post_id)?;
+    let author_id: Uuid = sqlx::query_scalar("SELECT author_id FROM posts WHERE id = $1")
+        .bind(post_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    if requester_id == author_id {
+        return Err(ApiError::Validation("cannot open a chat with your own post".into()));
+    }
+
+    let mut tx = state.db.begin().await?;
+    let room_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO chat_rooms (post_id, requester_id)
+        VALUES ($1, $2)
+        ON CONFLICT (post_id, requester_id)
+          WHERE post_id IS NOT NULL AND requester_id IS NOT NULL
+        DO UPDATE SET requester_id = EXCLUDED.requester_id
+        RETURNING id
+        "#,
+    )
+    .bind(post_id)
+    .bind(requester_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chat_room_members (room_id, user_id)
+        VALUES ($1, $2), ($1, $3)
+        ON CONFLICT (room_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(room_id)
+    .bind(requester_id)
+    .bind(author_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let room = load_room(&state, room_id, requester_id).await?;
+    Ok((StatusCode::CREATED, Json(room)))
 }
 
 pub async fn get_room(
@@ -126,9 +174,11 @@ pub async fn list_messages(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiError> {
-    authenticate_request(&state, &headers)?;
+    let claims = authenticate_request(&state, &headers)?;
+    let current_user_id = parse_claim_user_id(&claims)?;
     let room_id = parse_uuid(&id)?;
-    ensure_room_exists(&state, room_id).await?;
+    ensure_room_member(&state, room_id, current_user_id).await?;
+    mark_room_read(&state, room_id, current_user_id).await?;
 
     let rows = sqlx::query(
         r#"
@@ -166,7 +216,7 @@ pub async fn send_message(
         StdDuration::from_secs(state.config.throttle_ttl_seconds),
     )
     .await?;
-    ensure_room_exists(&state, room_id).await?;
+    ensure_room_member(&state, room_id, sender_id).await?;
 
     let message = persist_chat_message(&state, room_id, sender_id, payload.body).await?;
     broadcast_chat_message(&state, &room_id.to_string(), &message);
@@ -184,7 +234,8 @@ pub async fn room_ws(
     let claims = authenticate_socket(&state, &headers, query.access_token.as_deref())?;
     let room_id = parse_uuid(&id)?;
     let sender_id = parse_claim_user_id(&claims)?;
-    ensure_room_exists(&state, room_id).await?;
+    ensure_room_member(&state, room_id, sender_id).await?;
+    mark_room_read(&state, room_id, sender_id).await?;
 
     Ok(ws.on_upgrade(move |socket| handle_socket(state, room_id, sender_id, socket)))
 }
@@ -238,6 +289,9 @@ async fn handle_socket(state: AppState, room_id: Uuid, sender_user_id: Uuid, soc
             event = rx.recv() => {
                 match event {
                     Ok(event) if event.room_id == room_id_str => {
+                        if event.sender_id != sender_user_id.to_string() {
+                            let _ = mark_room_read(&state, room_id, sender_user_id).await;
+                        }
                         let Ok(payload) = serde_json::to_string(&event) else {
                             continue;
                         };
@@ -269,13 +323,17 @@ async fn load_room(
           COALESCE(p.name, p.title, 'Caso ZooHelp') AS post_title,
           COALESCE(last_message.body, '') AS last_message,
           COALESCE(last_message.created_at, r.created_at) AS last_message_time,
-          COALESCE(participant_user.id, r.post_id)::text AS participant_id,
+          participant_user.id::text AS participant_id,
           COALESCE(participant_user.name, 'ZooHelp') AS participant_name,
           participant_user.avatar_url AS participant_avatar,
           COALESCE(participant_user.verified, false) AS participant_verified,
-          COALESCE(participant_user.account_type::text, 'person') AS participant_type
+          COALESCE(participant_user.account_type::text, 'person') AS participant_type,
+          COALESCE(unread_messages.count, 0)::bigint AS unread
         FROM chat_rooms r
         LEFT JOIN posts p ON p.id = r.post_id
+        INNER JOIN chat_room_members me ON me.room_id = r.id AND me.user_id = $2
+        INNER JOIN chat_room_members peer ON peer.room_id = r.id AND peer.user_id <> $2
+        INNER JOIN users participant_user ON participant_user.id = peer.user_id
         LEFT JOIN LATERAL (
           SELECT body, created_at
           FROM chat_messages
@@ -284,16 +342,12 @@ async fn load_room(
           LIMIT 1
         ) last_message ON true
         LEFT JOIN LATERAL (
-          SELECT sender_id
+          SELECT count(*) AS count
           FROM chat_messages
-          WHERE room_id = r.id AND sender_id <> $2
-          ORDER BY created_at DESC
-          LIMIT 1
-        ) other_sender ON true
-        LEFT JOIN users participant_user ON participant_user.id = CASE
-          WHEN p.author_id = $2 THEN other_sender.sender_id
-          ELSE p.author_id
-        END
+          WHERE room_id = r.id
+            AND sender_id <> $2
+            AND created_at > COALESCE(me.last_read_at, '-infinity'::timestamptz)
+        ) unread_messages ON true
         WHERE r.id = $1
         "#,
     )
@@ -306,12 +360,24 @@ async fn load_room(
     Ok(row_to_conversation(row))
 }
 
-async fn ensure_room_exists(state: &AppState, room_id: Uuid) -> Result<(), ApiError> {
-    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM chat_rooms WHERE id = $1")
+async fn ensure_room_member(state: &AppState, room_id: Uuid, user_id: Uuid) -> Result<(), ApiError> {
+    let exists: Option<Uuid> = sqlx::query_scalar(
+        "SELECT room_id FROM chat_room_members WHERE room_id = $1 AND user_id = $2",
+    )
         .bind(room_id)
+        .bind(user_id)
         .fetch_optional(&state.db)
         .await?;
-    exists.map(|_| ()).ok_or(ApiError::NotFound)
+    exists.map(|_| ()).ok_or(ApiError::Forbidden)
+}
+
+async fn mark_room_read(state: &AppState, room_id: Uuid, user_id: Uuid) -> Result<(), ApiError> {
+    sqlx::query("UPDATE chat_room_members SET last_read_at = now() WHERE room_id = $1 AND user_id = $2")
+        .bind(room_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    Ok(())
 }
 
 async fn persist_chat_message(
@@ -349,7 +415,7 @@ fn row_to_conversation(row: sqlx::postgres::PgRow) -> ChatConversation {
         },
         last_message: row.get("last_message"),
         last_message_time: format_timestamp(row.get("last_message_time")),
-        unread: 0,
+        unread: row.get::<i64, _>("unread").try_into().unwrap_or(u32::MAX),
         post_title: row.get("post_title"),
     }
 }
