@@ -108,6 +108,18 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS idempotency_key text;",
         "CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx ON posts (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
+        "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES users(id) ON DELETE CASCADE;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS chat_rooms_private_post_requester_idx ON chat_rooms (post_id, requester_id) WHERE post_id IS NOT NULL AND requester_id IS NOT NULL;",
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_room_members (
+          room_id uuid NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          last_read_at timestamptz,
+          joined_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (room_id, user_id)
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS chat_room_members_user_idx ON chat_room_members (user_id, room_id);",
         r#"
         CREATE TABLE IF NOT EXISTS media_upload_intents (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
