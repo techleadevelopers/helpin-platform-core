@@ -56,7 +56,8 @@ pub async fn nearby_cases(
     let cases = posts
         .into_iter()
         .filter_map(|post| {
-            let distance = haversine_km(origin.0, origin.1, post.latitude, post.longitude);
+            let (lat, lng) = post.latitude.zip(post.longitude)?;
+            let distance = haversine_km(origin.0, origin.1, lat, lng);
             (distance <= radius).then_some(NearbyCase {
                 post,
                 distance_km: (distance * 10.0).round() / 10.0,
