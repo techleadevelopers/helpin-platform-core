@@ -78,8 +78,11 @@ fn rank_feed(query: FeedQuery, db_posts: Vec<Post>) -> Vec<Post> {
         })
         .filter(|post| query.urgent.map_or(true, |urgent| post.urgent == urgent))
         .filter_map(|post| {
-            let distance =
-                origin.map(|(lat, lng)| haversine_km(lat, lng, post.latitude, post.longitude));
+            let distance = origin.and_then(|(lat, lng)| {
+                post.latitude.zip(post.longitude).map(|(post_lat, post_lng)| {
+                    haversine_km(lat, lng, post_lat, post_lng)
+                })
+            });
             if distance.map_or(false, |value| value > radius) {
                 return None;
             }
@@ -164,11 +167,12 @@ pub(crate) async fn load_db_posts(
           AND (
             $5::double precision IS NULL
             OR $6::double precision IS NULL
-            OR p.geo IS NULL
-            OR ST_DWithin(
+            OR (
+              p.geo IS NOT NULL AND ST_DWithin(
               p.geo,
               ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography,
               $7
+              )
             )
           )
           AND (
