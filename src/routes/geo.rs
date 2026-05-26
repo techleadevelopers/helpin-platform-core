@@ -47,7 +47,9 @@ pub async fn nearby_cases(
             radius_km: Some(radius),
             limit: Some(100),
             before: None,
+            liked: None,
         },
+        None,
     )
     .await?;
 
