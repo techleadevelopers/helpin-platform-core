@@ -92,7 +92,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/posts/:id",
             get(posts::get_post).delete(posts::delete_post),
         )
-        .route("/v1/posts/:id/like", post(posts::toggle_like))
+        .route(
+            "/v1/posts/:id/like",
+            post(posts::like_post)
+                .put(posts::like_post)
+                .delete(posts::unlike_post),
+        )
         .route(
             "/v1/posts/:id/comments",
             get(posts::list_comments).post(posts::create_comment),
