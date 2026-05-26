@@ -13,7 +13,7 @@ mod donations;
 mod feed;
 mod geo;
 mod health;
-mod maps;
+pub(crate) mod maps;
 mod marketplace;
 mod media;
 mod notifications;
