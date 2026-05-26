@@ -42,7 +42,9 @@ pub async fn search(
             radius_km: None,
             limit: Some(100),
             before: None,
+            liked: None,
         },
+        None,
     )
     .await?
     .into_iter()
