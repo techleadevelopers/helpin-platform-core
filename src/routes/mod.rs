@@ -120,7 +120,13 @@ pub fn router(state: AppState) -> Router {
             "/v1/chat/rooms/:id/messages",
             get(chat::list_messages).post(chat::send_message),
         )
+        .route("/v1/chat/rooms/:id/read", patch(chat::mark_read))
+        .route("/v1/chat/rooms/:id/ws-ticket", post(chat::create_ws_ticket))
         .route("/v1/chat/rooms/:id/ws", get(chat::room_ws))
+        .route(
+            "/v1/chat/participants/:id/block",
+            axum::routing::put(chat::block_participant).delete(chat::unblock_participant),
+        )
         .route("/v1/geo/nearby", get(geo::nearby_cases))
         .route("/v1/maps/static-url", get(maps::static_map_url))
         .route("/v1/maps/geocode", get(maps::geocode))
