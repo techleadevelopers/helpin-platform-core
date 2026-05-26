@@ -97,8 +97,11 @@ impl NotificationEngine {
     #[cfg(test)]
     pub fn dispatch_rescue_alert(&self, post: &Post, default_radius_km: f64) -> RescueAlert {
         let radius_km = alert_radius_km(post.urgent, default_radius_km);
-        let recipients =
-            self.nearby_recipients(post.latitude, post.longitude, radius_km, post.urgent);
+        let (lat, lng) = post
+            .latitude
+            .zip(post.longitude)
+            .expect("seed rescue posts must have confirmed coordinates");
+        let recipients = self.nearby_recipients(lat, lng, radius_km, post.urgent);
         let title = if post.urgent {
             "Resgate urgente perto de voce".to_string()
         } else {
@@ -114,8 +117,8 @@ impl NotificationEngine {
             title,
             body,
             image_url: post.image.clone(),
-            lat: post.latitude,
-            lng: post.longitude,
+            lat,
+            lng,
             radius_km,
             critical: post.urgent,
             actions: vec![
@@ -258,6 +261,9 @@ async fn build_persistent_rescue_alert(
     post: &Post,
     default_radius_km: f64,
 ) -> Result<RescueAlert, sqlx::Error> {
+    let (lat, lng) = post.latitude.zip(post.longitude).ok_or_else(|| {
+        sqlx::Error::Protocol("cannot dispatch rescue alert without confirmed coordinates".into())
+    })?;
     let radius_km = alert_radius_km(post.urgent, default_radius_km);
     let title = if post.urgent {
         "Resgate urgente perto de voce".to_string()
@@ -270,7 +276,7 @@ async fn build_persistent_rescue_alert(
     );
 
     let lat_delta = radius_km / EARTH_KM_PER_DEGREE;
-    let lng_delta = longitude_delta_for_radius(post.latitude, radius_km);
+    let lng_delta = longitude_delta_for_radius(lat, radius_km);
     let rows = sqlx::query(
         r#"
         SELECT user_id, push_token, platform, lat, lng, radius_km, critical_alerts
@@ -282,10 +288,10 @@ async fn build_persistent_rescue_alert(
         "#,
     )
     .bind(ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES as i32)
-    .bind(post.latitude - lat_delta)
-    .bind(post.latitude + lat_delta)
-    .bind(post.longitude - lng_delta)
-    .bind(post.longitude + lng_delta)
+    .bind(lat - lat_delta)
+    .bind(lat + lat_delta)
+    .bind(lng - lng_delta)
+    .bind(lng + lng_delta)
     .bind(post.urgent)
     .fetch_all(db)
     .await?;
@@ -294,12 +300,7 @@ async fn build_persistent_rescue_alert(
         .into_iter()
         .filter_map(|row| {
             let subscription_radius: f64 = row.get("radius_km");
-            let distance = haversine_km(
-                post.latitude,
-                post.longitude,
-                row.get("lat"),
-                row.get("lng"),
-            );
+            let distance = haversine_km(lat, lng, row.get("lat"), row.get("lng"));
             let effective_radius = radius_km.min(subscription_radius);
             (distance <= effective_radius).then_some(AlertRecipient {
                 user_id: row.get::<Uuid, _>("user_id").to_string(),
@@ -319,8 +320,8 @@ async fn build_persistent_rescue_alert(
         title,
         body,
         image_url: post.image.clone(),
-        lat: post.latitude,
-        lng: post.longitude,
+        lat,
+        lng,
         radius_km,
         critical: post.urgent,
         actions: vec![
@@ -460,8 +461,8 @@ mod tests {
             user_id: "near".into(),
             push_token: "ExponentPushToken[near]".into(),
             platform: PushPlatform::Expo,
-            lat: post.latitude + 0.0001,
-            lng: post.longitude,
+            lat: post.latitude.expect("seed latitude") + 0.0001,
+            lng: post.longitude.expect("seed longitude"),
             radius_km: 10.0,
             critical_alerts: true,
             updated_at: "now".into(),
@@ -470,8 +471,8 @@ mod tests {
             user_id: "near-without-critical-opt-in".into(),
             push_token: "ExponentPushToken[near-without-critical-opt-in]".into(),
             platform: PushPlatform::Expo,
-            lat: post.latitude + 0.0001,
-            lng: post.longitude,
+            lat: post.latitude.expect("seed latitude") + 0.0001,
+            lng: post.longitude.expect("seed longitude"),
             radius_km: 10.0,
             critical_alerts: false,
             updated_at: "now".into(),
@@ -480,8 +481,8 @@ mod tests {
             user_id: "far".into(),
             push_token: "ExponentPushToken[far]".into(),
             platform: PushPlatform::Expo,
-            lat: post.latitude + 0.001,
-            lng: post.longitude,
+            lat: post.latitude.expect("seed latitude") + 0.001,
+            lng: post.longitude.expect("seed longitude"),
             radius_km: 10.0,
             critical_alerts: true,
             updated_at: "now".into(),
