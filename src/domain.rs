@@ -100,8 +100,11 @@ pub struct Post {
     pub created_at: String,
     pub contact: String,
     pub tags: Vec<String>,
-    pub latitude: f64,
-    pub longitude: f64,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub geo_status: String,
+    pub geo_source: Option<String>,
+    pub route_public: bool,
     pub rescue_operational: Option<RescueOperationalSummary>,
 }
 
@@ -442,8 +445,11 @@ fn post(
         created_at: created_at.into(),
         contact: contact.into(),
         tags: tags.iter().map(|tag| (*tag).into()).collect(),
-        latitude,
-        longitude,
+        latitude: Some(latitude),
+        longitude: Some(longitude),
+        geo_status: "confirmed".into(),
+        geo_source: Some("gps_confirmed".into()),
+        route_public: true,
         rescue_operational: None,
     }
 }
