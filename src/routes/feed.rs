@@ -3,6 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
+    http::HeaderMap,
     response::Response,
     Json,
 };
@@ -15,7 +16,10 @@ use uuid::Uuid;
 use crate::{
     domain::{AccountType, Author, Post, PostType, RescueOperationalSummary},
     error::ApiError,
-    routes::posts::{animal_type_from_str, load_post_media, post_type_as_str, post_type_from_str},
+    routes::posts::{
+        animal_type_from_str, load_post_media, optional_authenticated_user_id, post_type_as_str,
+        post_type_from_str,
+    },
     state::AppState,
 };
 
@@ -33,13 +37,19 @@ pub struct FeedQuery {
     pub radius_km: Option<f64>,
     pub limit: Option<usize>,
     pub before: Option<DateTime<Utc>>,
+    pub liked: Option<bool>,
 }
 
 pub async fn list_feed(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<Vec<Post>>, ApiError> {
-    Ok(Json(load_db_posts(&state, &query).await?))
+    let viewer_id = optional_authenticated_user_id(&state, &headers);
+    if query.liked.is_some() && viewer_id.is_none() {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(Json(load_db_posts(&state, &query, viewer_id).await?))
 }
 
 pub async fn feed_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
@@ -89,6 +99,7 @@ fn rank_feed(query: FeedQuery, db_posts: Vec<Post>) -> Vec<Post> {
 pub(crate) async fn load_db_posts(
     state: &AppState,
     query: &FeedQuery,
+    viewer_id: Option<Uuid>,
 ) -> Result<Vec<Post>, sqlx::Error> {
     let limit = query.limit.unwrap_or(30).clamp(1, 100) as i64;
     let radius = query.radius_km.unwrap_or(80.0).clamp(1.0, 500.0) * 1000.0;
@@ -117,6 +128,9 @@ pub(crate) async fn load_db_posts(
             ) AS image,
             p.text_only,
             p.likes_count,
+            ($8::uuid IS NOT NULL AND EXISTS (
+                SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $8
+            )) AS liked_by_me,
             p.comments_count,
             p.shares_count,
             p.urgent,
@@ -154,8 +168,28 @@ pub(crate) async fn load_db_posts(
               $7
             )
           )
-        ORDER BY p.created_at DESC, p.id DESC
-        LIMIT $8
+          AND (
+            $9::boolean IS NULL
+            OR ($8::uuid IS NOT NULL AND EXISTS (
+              SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $8
+            ) = $9)
+          )
+        ORDER BY (
+          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1000.0 ELSE 0.0 END
+          + CASE p.post_type::text
+              WHEN 'emergency' THEN 500.0 WHEN 'lost' THEN 350.0 WHEN 'found' THEN 250.0
+              WHEN 'adoption' THEN 180.0 WHEN 'campaign' THEN 120.0 ELSE 40.0 END
+          + CASE WHEN u.verified THEN 75.0 ELSE 0.0 END
+          + LN(1.0 + p.likes_count) * 15.0
+          + LN(1.0 + p.comments_count) * 25.0
+          + LN(1.0 + p.shares_count) * 35.0
+          + 300.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - p.created_at)), 0.0) / 86400.0)
+          + CASE WHEN $5::double precision IS NULL OR $6::double precision IS NULL OR p.geo IS NULL THEN 0.0
+              ELSE GREATEST(-1500.0, 3000.0 - (ST_Distance(
+                p.geo, ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography
+              ) / 1000.0) * 150.0) END
+        ) DESC, p.created_at DESC, p.id DESC
+        LIMIT $10
         "#
     } else {
         r#"
@@ -178,6 +212,9 @@ pub(crate) async fn load_db_posts(
             ) AS image,
             p.text_only,
             p.likes_count,
+            ($8::uuid IS NOT NULL AND EXISTS (
+                SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $8
+            )) AS liked_by_me,
             p.comments_count,
             p.shares_count,
             p.urgent,
@@ -216,8 +253,34 @@ pub(crate) async fn load_db_posts(
                 $6 + ($7 / (111000.0 * GREATEST(abs(cos(radians($5))), 0.2)))
             )
           )
-        ORDER BY p.created_at DESC, p.id DESC
-        LIMIT $8
+          AND (
+            $9::boolean IS NULL
+            OR ($8::uuid IS NOT NULL AND EXISTS (
+              SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $8
+            ) = $9)
+          )
+        ORDER BY (
+          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1000.0 ELSE 0.0 END
+          + CASE p.post_type::text
+              WHEN 'emergency' THEN 500.0 WHEN 'lost' THEN 350.0 WHEN 'found' THEN 250.0
+              WHEN 'adoption' THEN 180.0 WHEN 'campaign' THEN 120.0 ELSE 40.0 END
+          + CASE WHEN u.verified THEN 75.0 ELSE 0.0 END
+          + LN(1.0 + p.likes_count) * 15.0
+          + LN(1.0 + p.comments_count) * 25.0
+          + LN(1.0 + p.shares_count) * 35.0
+          + 300.0 / (1.0 + GREATEST(EXTRACT(EPOCH FROM (now() - p.created_at)), 0.0) / 86400.0)
+          + CASE WHEN $5::double precision IS NULL OR $6::double precision IS NULL THEN 0.0
+              ELSE GREATEST(-1500.0, 3000.0 - (
+                SQRT(
+                  POWER((COALESCE(p.latitude, $5) - $5) * 111.0, 2)
+                  + POWER(
+                    (COALESCE(p.longitude, $6) - $6) * 111.0
+                    * GREATEST(abs(cos(radians($5))), 0.2), 2
+                  )
+                ) * 150.0
+              )) END
+        ) DESC, p.created_at DESC, p.id DESC
+        LIMIT $10
         "#
     };
 
@@ -229,6 +292,8 @@ pub(crate) async fn load_db_posts(
         .bind(query.lat)
         .bind(query.lng)
         .bind(radius)
+        .bind(viewer_id)
+        .bind(query.liked)
         .bind(limit)
         .fetch_all(&state.db)
         .await?;
@@ -262,6 +327,7 @@ pub(crate) async fn load_db_posts(
                     account_type: author_type,
                 },
                 likes: row.get::<i32, _>("likes_count").max(0) as u32,
+                liked_by_me: row.get("liked_by_me"),
                 comments: row.get::<i32, _>("comments_count").max(0) as u32,
                 shares: row.get::<i32, _>("shares_count").max(0) as u32,
                 urgent: row.get("urgent"),
@@ -408,6 +474,7 @@ mod tests {
                 radius_km: Some(20.0),
                 limit: Some(10),
                 before: None,
+                liked: None,
             },
             seed_posts(),
         );
@@ -427,6 +494,7 @@ mod tests {
                 radius_km: Some(5.0),
                 limit: Some(100),
                 before: None,
+                liked: None,
             },
             seed_posts(),
         );
