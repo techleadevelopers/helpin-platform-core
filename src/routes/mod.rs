@@ -75,6 +75,18 @@ pub fn router(state: AppState) -> Router {
             patch(admin::review_moderation_job),
         )
         .route("/v1/admin/reports/posts", get(admin::list_post_reports))
+        .route("/v1/admin/queues/status", get(admin::queue_status))
+        .route("/v1/admin/queues/:queue_name/jobs", get(admin::queue_jobs))
+        .route(
+            "/v1/admin/queues/:queue_name/jobs/:job_id/retry",
+            post(admin::retry_queue_job),
+        )
+        .route("/admin/queues/status", get(admin::queue_status))
+        .route("/admin/queues/:queue_name/jobs", get(admin::queue_jobs))
+        .route(
+            "/admin/queues/:queue_name/jobs/:job_id/retry",
+            post(admin::retry_queue_job),
+        )
         .route(
             "/v1/me",
             get(auth::me)
