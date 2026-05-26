@@ -581,8 +581,8 @@ pub struct RescueEvent {
     pub rescue_id: String,
     pub post_id: String,
     pub status: String,
-    pub lat: Option<f64>,
-    pub lng: Option<f64>,
+    pub lat: f64,
+    pub lng: f64,
     pub accuracy: Option<f64>,
     pub updated_at: String,
 }
@@ -594,7 +594,7 @@ pub struct FeedEvent {
     pub post_type: String,
     pub urgent: bool,
     pub rescue_status: String,
-    pub lat: f64,
-    pub lng: f64,
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
     pub created_at: String,
 }
