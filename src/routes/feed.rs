@@ -117,7 +117,7 @@ pub(crate) async fn load_db_posts(
             COALESCE(p.breed, '') AS breed,
             COALESCE(p.age, '') AS age,
             p.description,
-            COALESCE(p.location_label, '') AS location,
+            CASE WHEN p.route_public THEN COALESCE(p.location_label, '') ELSE COALESCE(p.neighborhood, '') END AS location,
             COALESCE(p.neighborhood, p.location_label, '') AS neighborhood,
             (
                 SELECT pm.public_url
@@ -137,10 +137,13 @@ pub(crate) async fn load_db_posts(
             p.rescue_status,
             p.resolved_at,
             p.created_at,
-            p.contact,
+            CASE WHEN p.route_public THEN p.contact ELSE '' END AS contact,
             p.tags,
-            COALESCE(p.latitude, -23.5505) AS latitude,
-            COALESCE(p.longitude, -46.6333) AS longitude,
+            CASE WHEN p.route_public AND p.geo_status = 'confirmed' THEN p.latitude ELSE NULL END AS latitude,
+            CASE WHEN p.route_public AND p.geo_status = 'confirmed' THEN p.longitude ELSE NULL END AS longitude,
+            p.geo_status,
+            p.geo_source,
+            p.route_public,
             fs.current_phase AS fanout_phase,
             COALESCE(fs.confirmed_count, 0) AS help_going_count,
             COALESCE(fs.arrived_count, 0) AS help_arrived_count,
@@ -201,7 +204,7 @@ pub(crate) async fn load_db_posts(
             COALESCE(p.breed, '') AS breed,
             COALESCE(p.age, '') AS age,
             p.description,
-            COALESCE(p.location_label, '') AS location,
+            CASE WHEN p.route_public THEN COALESCE(p.location_label, '') ELSE COALESCE(p.neighborhood, '') END AS location,
             COALESCE(p.neighborhood, p.location_label, '') AS neighborhood,
             (
                 SELECT pm.public_url
@@ -221,10 +224,13 @@ pub(crate) async fn load_db_posts(
             p.rescue_status,
             p.resolved_at,
             p.created_at,
-            p.contact,
+            CASE WHEN p.route_public THEN p.contact ELSE '' END AS contact,
             p.tags,
-            COALESCE(p.latitude, -23.5505) AS latitude,
-            COALESCE(p.longitude, -46.6333) AS longitude,
+            CASE WHEN p.route_public AND p.geo_status = 'confirmed' THEN p.latitude ELSE NULL END AS latitude,
+            CASE WHEN p.route_public AND p.geo_status = 'confirmed' THEN p.longitude ELSE NULL END AS longitude,
+            p.geo_status,
+            p.geo_source,
+            p.route_public,
             fs.current_phase AS fanout_phase,
             COALESCE(fs.confirmed_count, 0) AS help_going_count,
             COALESCE(fs.arrived_count, 0) AS help_arrived_count,
@@ -272,9 +278,9 @@ pub(crate) async fn load_db_posts(
           + CASE WHEN $5::double precision IS NULL OR $6::double precision IS NULL THEN 0.0
               ELSE GREATEST(-1500.0, 3000.0 - (
                 SQRT(
-                  POWER((COALESCE(p.latitude, $5) - $5) * 111.0, 2)
+                  POWER((p.latitude - $5) * 111.0, 2)
                   + POWER(
-                    (COALESCE(p.longitude, $6) - $6) * 111.0
+                    (p.longitude - $6) * 111.0
                     * GREATEST(abs(cos(radians($5))), 0.2), 2
                   )
                 ) * 150.0
@@ -340,6 +346,9 @@ pub(crate) async fn load_db_posts(
                 tags: row.get("tags"),
                 latitude: row.get("latitude"),
                 longitude: row.get("longitude"),
+                geo_status: row.get("geo_status"),
+                geo_source: row.get("geo_source"),
+                route_public: row.get("route_public"),
                 rescue_operational: rescue_operational_from_row(&row),
             }
         })
