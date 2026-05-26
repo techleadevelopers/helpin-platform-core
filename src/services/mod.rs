@@ -3,6 +3,7 @@ pub mod email;
 pub mod event_bus;
 pub mod fraud;
 pub mod geo;
+pub mod geocoding_worker;
 pub mod notifications;
 pub mod push_worker;
 pub mod rate_limit;
