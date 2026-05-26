@@ -16,8 +16,6 @@ use crate::{
     },
     error::ApiError,
     routes::auth::audit_event,
-    routes::maps,
-    services::geo::haversine_km,
     services::notifications::RescueAlert,
     services::rescue_fanout::{
         create_fanout_state_for_post, upsert_rescue_response, RescueResponseRecord,
@@ -29,7 +27,6 @@ use crate::{
 const MAX_POST_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 100 * 1024 * 1024;
-const MAX_CLIENT_SERVER_LOCATION_DRIFT_KM: f64 = 1.5;
 const ALLOWED_MEDIA_TYPES: &[&str] = &[
     "image/jpeg",
     "image/png",
@@ -154,6 +151,8 @@ pub struct CreatePostRequest {
     pub latitude: Option<f64>,
     #[validate(range(min = -180.0, max = 180.0))]
     pub longitude: Option<f64>,
+    pub geo_source: Option<String>,
+    pub route_public: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -283,8 +282,12 @@ fn default_rescue_response_status() -> String {
 struct ResolvedPostLocation {
     label: String,
     neighborhood: String,
-    latitude: f64,
-    longitude: f64,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    geo_status: &'static str,
+    geo_source: Option<&'static str>,
+    route_public: bool,
+    enqueue_geocode: bool,
 }
 
 impl PostLocationAddress {
@@ -323,49 +326,35 @@ impl PostLocationAddress {
     }
 }
 
-async fn resolve_post_location(
-    state: &AppState,
+fn resolve_post_location(
     payload: &CreatePostRequest,
-    requires_geo_alert: bool,
 ) -> Result<ResolvedPostLocation, ApiError> {
     if let Some(address) = payload.location_address.as_ref() {
         address.validate_complete()?;
         let label = address.label();
-        let geocoded = maps::geocode_address(state, &label).await?.ok_or_else(|| {
-            ApiError::Validation(
-                "could not geocode locationAddress; verify street, number, neighborhood, city and state"
-                    .into(),
-            )
-        })?;
-
-        if let (Some(client_lat), Some(client_lng)) = (payload.latitude, payload.longitude) {
-            let drift_km = haversine_km(
-                client_lat,
-                client_lng,
-                geocoded.latitude,
-                geocoded.longitude,
-            );
-            if drift_km > MAX_CLIENT_SERVER_LOCATION_DRIFT_KM {
-                return Err(ApiError::Validation(format!(
-                    "latitude/longitude do not match locationAddress; drift is {:.1} km",
-                    drift_km
-                )));
-            }
-        }
-
         return Ok(ResolvedPostLocation {
             label,
             neighborhood: address.neighborhood.trim().to_string(),
-            latitude: geocoded.latitude,
-            longitude: geocoded.longitude,
+            latitude: None,
+            longitude: None,
+            geo_status: "pending",
+            geo_source: None,
+            route_public: payload.route_public.unwrap_or(false),
+            enqueue_geocode: true,
         });
     }
 
-    if requires_geo_alert && (payload.latitude.is_none() || payload.longitude.is_none()) {
+    if payload.latitude.is_some() ^ payload.longitude.is_some() {
         return Err(ApiError::Validation(
-            "latitude and longitude are required for emergency rescue alerts".into(),
+            "latitude and longitude must be sent together".into(),
         ));
     }
+    if payload.latitude.is_some() && payload.geo_source.as_deref() != Some("gps_confirmed") {
+        return Err(ApiError::Validation(
+            "coordinates require geoSource=gps_confirmed".into(),
+        ));
+    }
+    let confirmed = payload.latitude.is_some();
 
     Ok(ResolvedPostLocation {
         label: payload.location.clone(),
@@ -373,8 +362,12 @@ async fn resolve_post_location(
             .neighborhood
             .clone()
             .unwrap_or_else(|| payload.location.clone()),
-        latitude: payload.latitude.unwrap_or(-23.5505),
-        longitude: payload.longitude.unwrap_or(-46.6333),
+        latitude: payload.latitude,
+        longitude: payload.longitude,
+        geo_status: if confirmed { "confirmed" } else { "unavailable" },
+        geo_source: confirmed.then_some("gps_confirmed"),
+        route_public: confirmed && payload.route_public.unwrap_or(false),
+        enqueue_geocode: false,
     })
 }
 
@@ -435,7 +428,7 @@ pub async fn create_post(
     let is_urgent = payload.urgent.unwrap_or(false);
     let post_type = payload.post_type.clone();
     let requires_geo_alert = is_urgent || post_type == PostType::Emergency;
-    let resolved_location = resolve_post_location(&state, &payload, requires_geo_alert).await?;
+    let resolved_location = resolve_post_location(&payload)?;
 
     let name = payload.name.unwrap_or_else(|| "Publicacao".into());
     let breed = payload.breed.unwrap_or_default();
@@ -447,8 +440,13 @@ pub async fn create_post(
     let tags = payload.tags.unwrap_or_default();
     let latitude = resolved_location.latitude;
     let longitude = resolved_location.longitude;
+    let geo_status = resolved_location.geo_status;
+    let geo_source = resolved_location.geo_source;
+    let route_public = resolved_location.route_public
+        && matches!(post_type, PostType::Emergency | PostType::Lost | PostType::Found);
     let text_only = media.is_empty() && payload.image.is_none();
-    let initial_rescue_status = if requires_geo_alert { "active" } else { "open" };
+    let geo_ready_for_alert = requires_geo_alert && geo_status == "confirmed";
+    let initial_rescue_status = if geo_ready_for_alert { "active" } else { "open" };
 
     let mut tx = state.db.begin().await?;
     for (index, item) in media.iter().enumerate() {
@@ -491,13 +489,18 @@ pub async fn create_post(
         INSERT INTO posts (
             author_id, post_type, animal_type, name, breed, age, description,
             latitude, longitude, location_label, neighborhood, contact, tags,
-            urgent, rescue_status, text_only, moderation_status, fraud_risk, geo, idempotency_key
+            urgent, rescue_status, text_only, moderation_status, fraud_risk, geo, idempotency_key,
+            geo_status, geo_source, route_public, geo_provider, geo_confidence, geo_resolved_at
         )
         VALUES (
             $1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             $14, $15, $16, 'approved', $17,
-            ST_SetSRID(ST_MakePoint($9, $8), 4326)::geography,
-            $18
+            CASE WHEN $8::double precision IS NULL OR $9::double precision IS NULL THEN NULL
+              ELSE ST_SetSRID(ST_MakePoint($9, $8), 4326)::geography END,
+            $18, $19, $20, $21,
+            CASE WHEN $19 = 'confirmed' THEN 'device' ELSE NULL END,
+            CASE WHEN $19 = 'confirmed' THEN 1.0 ELSE NULL END,
+            CASE WHEN $19 = 'confirmed' THEN now() ELSE NULL END
         )
         RETURNING id
         "#
@@ -506,11 +509,15 @@ pub async fn create_post(
         INSERT INTO posts (
             author_id, post_type, animal_type, name, breed, age, description,
             latitude, longitude, location_label, neighborhood, contact, tags,
-            urgent, rescue_status, text_only, moderation_status, fraud_risk, idempotency_key
+            urgent, rescue_status, text_only, moderation_status, fraud_risk, idempotency_key,
+            geo_status, geo_source, route_public, geo_provider, geo_confidence, geo_resolved_at
         )
         VALUES (
             $1, $2::post_type, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, $16, 'approved', $17, $18
+            $14, $15, $16, 'approved', $17, $18, $19, $20, $21,
+            CASE WHEN $19 = 'confirmed' THEN 'device' ELSE NULL END,
+            CASE WHEN $19 = 'confirmed' THEN 1.0 ELSE NULL END,
+            CASE WHEN $19 = 'confirmed' THEN now() ELSE NULL END
         )
         RETURNING id
         "#
@@ -535,8 +542,21 @@ pub async fn create_post(
         .bind(text_only)
         .bind(i16::from(risk))
         .bind(idempotency_key)
+        .bind(geo_status)
+        .bind(geo_source)
+        .bind(route_public)
         .fetch_one(&mut *tx)
         .await?;
+
+    if resolved_location.enqueue_geocode {
+        sqlx::query(
+            "INSERT INTO post_geocode_jobs (post_id, address_label) VALUES ($1, $2) ON CONFLICT (post_id) DO NOTHING",
+        )
+        .bind(post_id)
+        .bind(&location)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let mut stored_media = Vec::with_capacity(media.len());
     for (index, item) in media.iter().enumerate() {
@@ -598,7 +618,10 @@ pub async fn create_post(
         tags,
         latitude,
         longitude,
-        rescue_operational: requires_geo_alert.then(|| RescueOperationalSummary {
+        geo_status: geo_status.to_string(),
+        geo_source: geo_source.map(str::to_string),
+        route_public,
+        rescue_operational: geo_ready_for_alert.then(|| RescueOperationalSummary {
             fanout_phase: Some(1),
             help_going_count: 0,
             help_arrived_count: 0,
@@ -606,7 +629,7 @@ pub async fn create_post(
         }),
     };
 
-    let rescue_fanout_state_id = if requires_geo_alert {
+    let rescue_fanout_state_id = if geo_ready_for_alert {
         let state_id = create_fanout_state_for_post(&state.db, post_id, None).await?;
         tracing::info!(
             post_id = %post.id,
@@ -1113,7 +1136,7 @@ pub(crate) async fn load_post_by_id(
             COALESCE(p.breed, '') AS breed,
             COALESCE(p.age, '') AS age,
             p.description,
-            COALESCE(p.location_label, '') AS location,
+            CASE WHEN p.route_public THEN COALESCE(p.location_label, '') ELSE COALESCE(p.neighborhood, '') END AS location,
             COALESCE(p.neighborhood, p.location_label, '') AS neighborhood,
             (
                 SELECT pm.public_url
@@ -1133,10 +1156,13 @@ pub(crate) async fn load_post_by_id(
             p.rescue_status,
             p.resolved_at,
             p.created_at,
-            p.contact,
+            CASE WHEN p.route_public THEN p.contact ELSE '' END AS contact,
             p.tags,
-            COALESCE(p.latitude, -23.5505) AS latitude,
-            COALESCE(p.longitude, -46.6333) AS longitude,
+            CASE WHEN p.route_public AND p.geo_status = 'confirmed' THEN p.latitude ELSE NULL END AS latitude,
+            CASE WHEN p.route_public AND p.geo_status = 'confirmed' THEN p.longitude ELSE NULL END AS longitude,
+            p.geo_status,
+            p.geo_source,
+            p.route_public,
             fs.current_phase AS fanout_phase,
             COALESCE(fs.confirmed_count, 0) AS help_going_count,
             COALESCE(fs.arrived_count, 0) AS help_arrived_count,
@@ -1208,6 +1234,9 @@ pub(crate) async fn load_post_by_id(
             tags: row.get("tags"),
             latitude: row.get("latitude"),
             longitude: row.get("longitude"),
+            geo_status: row.get("geo_status"),
+            geo_source: row.get("geo_source"),
+            route_public: row.get("route_public"),
             rescue_operational: rescue_operational_from_row(&row),
         };
         post.images = media_by_post.remove(&id).unwrap_or_default();
