@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{
     domain::AccountType,
     error::ApiError,
+    routes::auth::audit_event,
     services::{auth as auth_service, rate_limit},
     state::AppState,
 };
@@ -149,6 +150,32 @@ pub struct AdminUserProfile {
     pub total_spent: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueInfo {
+    pub name: String,
+    pub active: i64,
+    pub waiting: i64,
+    pub completed: i64,
+    pub failed: i64,
+    pub delayed: i64,
+    pub paused: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueJob {
+    pub id: String,
+    pub name: String,
+    pub data: serde_json::Value,
+    pub status: String,
+    pub progress: i32,
+    pub attempts_made: i32,
+    pub failed_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 pub async fn list_users(
@@ -615,6 +642,151 @@ pub async fn list_post_reports(
     Ok(Json(rows.into_iter().map(row_to_post_report).collect()))
 }
 
+pub async fn queue_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<QueueInfo>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+
+    let waiting = count_push_jobs(&state, "queued").await?;
+    let failed = count_push_jobs(&state, "failed").await? + count_push_jobs(&state, "dead_letter").await?;
+    let completed = count_push_jobs(&state, "sent").await?;
+    let delayed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM push_delivery_jobs WHERE status IN ('queued', 'failed') AND next_attempt_at > now()",
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(vec![QueueInfo {
+        name: "push-delivery".into(),
+        active: 0,
+        waiting,
+        completed,
+        failed,
+        delayed,
+        paused: !state.config.push_worker_enabled,
+    }]))
+}
+
+pub async fn queue_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(queue_name): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<QueueJob>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    ensure_push_queue(&queue_name)?;
+
+    let status_filter = query.get("status").and_then(|value| match value.as_str() {
+        "waiting" => Some(vec!["queued"]),
+        "failed" => Some(vec!["failed", "dead_letter"]),
+        "completed" => Some(vec!["sent"]),
+        "delayed" => Some(vec!["queued", "failed"]),
+        "active" => Some(Vec::new()),
+        _ => None,
+    });
+
+    let mut rows = if let Some(statuses) = status_filter {
+        if statuses.is_empty() {
+            Vec::new()
+        } else if query.get("status").map(String::as_str) == Some("delayed") {
+            sqlx::query(
+                r#"
+                SELECT id, payload, status, attempts, last_error, created_at, updated_at
+                FROM push_delivery_jobs
+                WHERE status = ANY($1) AND next_attempt_at > now()
+                ORDER BY next_attempt_at ASC
+                LIMIT 200
+                "#,
+            )
+            .bind(statuses)
+            .fetch_all(&state.db)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, payload, status, attempts, last_error, created_at, updated_at
+                FROM push_delivery_jobs
+                WHERE status = ANY($1)
+                ORDER BY created_at DESC
+                LIMIT 200
+                "#,
+            )
+            .bind(statuses)
+            .fetch_all(&state.db)
+            .await?
+        }
+    } else {
+        sqlx::query(
+            r#"
+            SELECT id, payload, status, attempts, last_error, created_at, updated_at
+            FROM push_delivery_jobs
+            ORDER BY created_at DESC
+            LIMIT 200
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    rows.sort_by_key(|row| row.get::<DateTime<Utc>, _>("created_at"));
+    rows.reverse();
+    Ok(Json(rows.into_iter().map(row_to_queue_job).collect()))
+}
+
+pub async fn retry_queue_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((queue_name, job_id)): Path<(String, Uuid)>,
+) -> Result<Json<QueueJob>, ApiError> {
+    let admin = authenticate_admin(&state, &headers)?;
+    ensure_push_queue(&queue_name)?;
+
+    let row = sqlx::query(
+        r#"
+        UPDATE push_delivery_jobs
+        SET status = 'queued',
+            next_attempt_at = now(),
+            last_error = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND status IN ('failed', 'dead_letter')
+        RETURNING id, payload, status, attempts, last_error, created_at, updated_at
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    audit_event(
+        &state,
+        Uuid::parse_str(&admin.sub).ok(),
+        "admin.queue_job.retry",
+        serde_json::json!({ "queue": queue_name, "jobId": job_id }),
+    )
+    .await;
+
+    Ok(Json(row_to_queue_job(row)))
+}
+
+async fn count_push_jobs(state: &AppState, status: &str) -> Result<i64, ApiError> {
+    Ok(
+        sqlx::query_scalar("SELECT count(*) FROM push_delivery_jobs WHERE status = $1")
+            .bind(status)
+            .fetch_one(&state.db)
+            .await?,
+    )
+}
+
+fn ensure_push_queue(queue_name: &str) -> Result<(), ApiError> {
+    if queue_name == "push-delivery" || queue_name == "push_delivery_jobs" {
+        Ok(())
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
 fn authenticate_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -854,5 +1026,31 @@ fn row_to_post_report(row: sqlx::postgres::PgRow) -> PostReport {
         severity: row.get("severity"),
         status: row.get("status"),
         created_at: row.get("created_at"),
+    }
+}
+
+fn row_to_queue_job(row: sqlx::postgres::PgRow) -> QueueJob {
+    let status: String = row.get("status");
+    let finished_at = if status == "sent" {
+        Some(row.get("updated_at"))
+    } else {
+        None
+    };
+    QueueJob {
+        id: row.get::<Uuid, _>("id").to_string(),
+        name: "push-delivery".into(),
+        data: row.get("payload"),
+        status: match status.as_str() {
+            "queued" => "waiting",
+            "sent" => "completed",
+            "failed" | "dead_letter" => "failed",
+            _ => status.as_str(),
+        }
+        .into(),
+        progress: if status == "sent" { 100 } else { 0 },
+        attempts_made: row.get("attempts"),
+        failed_reason: row.get("last_error"),
+        created_at: row.get("created_at"),
+        finished_at,
     }
 }
