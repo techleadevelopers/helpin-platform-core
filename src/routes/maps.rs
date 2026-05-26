@@ -1,8 +1,15 @@
-use axum::{extract::Query, extract::State, Json};
+use std::time::Duration as StdDuration;
+
+use axum::{extract::Query, extract::State, http::HeaderMap, Json};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{
+    error::ApiError,
+    routes::auth::authenticate_request,
+    services::rate_limit,
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
@@ -23,7 +30,7 @@ pub struct StaticMapQuery {
 #[serde(rename_all = "camelCase")]
 pub struct StaticMapResponse {
     pub provider: String,
-    pub image_url: String,
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -107,6 +114,7 @@ struct GoogleLocation {
 }
 
 pub async fn static_map_url(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<StaticMapQuery>,
 ) -> Result<Json<StaticMapResponse>, ApiError> {
@@ -114,47 +122,16 @@ pub async fn static_map_url(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
-    let provider = state
-        .config
-        .geocoding_api_provider
-        .clone()
-        .unwrap_or_else(|| "google".to_string())
-        .to_lowercase();
-
-    if provider != "google" && provider != "google_maps" {
-        return Err(ApiError::Validation(format!(
-            "unsupported geocoding provider: {provider}"
-        )));
-    }
-
-    let api_key = state
-        .config
-        .google_maps_api_key
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| ApiError::Validation("GOOGLE_MAPS_API_KEY is required".into()))?;
-
-    let zoom = query.zoom.unwrap_or(14);
-    let width = query.width.unwrap_or(640);
-    let height = query.height.unwrap_or(320);
-    let marker = format!("color:green|label:Z|{},{}", query.lat, query.lng);
-    let image_url = format!(
-        "https://maps.googleapis.com/maps/api/staticmap?center={},{}&zoom={zoom}&size={}x{}&scale=2&maptype=roadmap&markers={}&key={}",
-        query.lat,
-        query.lng,
-        width,
-        height,
-        url_component(&marker),
-        url_component(api_key),
-    );
+    authorize_maps_request(&state, &headers, "static").await?;
 
     Ok(Json(StaticMapResponse {
         provider: "google".to_string(),
-        image_url,
+        image_url: None,
     }))
 }
 
 pub async fn geocode(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<GeocodeQuery>,
 ) -> Result<Json<Option<GeocodeResponse>>, ApiError> {
@@ -162,6 +139,7 @@ pub async fn geocode(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
+    authorize_maps_request(&state, &headers, "geocode").await?;
     Ok(Json(geocode_address(&state, &query.address).await?))
 }
 
@@ -195,6 +173,7 @@ pub async fn geocode_address(
 }
 
 pub async fn place_autocomplete(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<PlaceAutocompleteQuery>,
 ) -> Result<Json<PlaceAutocompleteResponse>, ApiError> {
@@ -202,6 +181,7 @@ pub async fn place_autocomplete(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
+    authorize_maps_request(&state, &headers, "autocomplete").await?;
     let api_key = google_maps_key(&state)?;
     let sanitized = sanitize_address(&query.input);
     let url = format!(
@@ -239,6 +219,7 @@ pub async fn place_autocomplete(
 }
 
 pub async fn place_details(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<PlaceDetailsQuery>,
 ) -> Result<Json<Option<GeocodeResponse>>, ApiError> {
@@ -246,6 +227,7 @@ pub async fn place_details(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
+    authorize_maps_request(&state, &headers, "details").await?;
     let api_key = google_maps_key(&state)?;
     let url = format!(
         "https://maps.googleapis.com/maps/api/place/details/json?place_id={}&fields=geometry,formatted_address&language=pt-BR&key={}",
@@ -306,4 +288,19 @@ fn sanitize_address(query: &str) -> String {
         .replace("Doutro", "Doutor")
         .replace(" dr ", " Doutor ")
         .replace(" Dr ", " Doutor ")
+}
+
+async fn authorize_maps_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &str,
+) -> Result<(), ApiError> {
+    let claims = authenticate_request(state, headers)?;
+    rate_limit::check_key(
+        state,
+        &format!("maps:{action}:{}", claims.sub),
+        state.config.throttle_limit * 3,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await
 }
