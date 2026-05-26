@@ -170,13 +170,23 @@ pub async fn trigger(
     )
     .await?;
     let post_id = Uuid::parse_str(&payload.post_id).map_err(|_| ApiError::NotFound)?;
-    let post_exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM posts WHERE id = $1")
+    let confirmed_location: Option<(f64, f64)> = sqlx::query_as(
+        r#"
+        SELECT latitude, longitude
+        FROM posts
+        WHERE id = $1
+          AND author_id = $2
+          AND (urgent = true OR post_type::text = 'emergency')
+          AND geo_status = 'confirmed'
+          AND latitude IS NOT NULL
+          AND longitude IS NOT NULL
+        "#,
+    )
         .bind(post_id)
+        .bind(reporter_user_id)
         .fetch_optional(&state.db)
         .await?;
-    if post_exists.is_none() {
-        return Err(ApiError::NotFound);
-    }
+    let (latitude, longitude) = confirmed_location.ok_or(ApiError::Forbidden)?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
@@ -189,8 +199,8 @@ pub async fn trigger(
     .bind(Uuid::now_v7())
     .bind(post_id)
     .bind(reporter_user_id)
-    .bind(payload.lat)
-    .bind(payload.lng)
+    .bind(latitude)
+    .bind(longitude)
     .bind(payload.accuracy)
     .fetch_one(&mut *tx)
     .await?;
