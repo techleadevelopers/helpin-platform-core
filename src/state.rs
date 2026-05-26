@@ -7,7 +7,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
 
 use crate::{
     config::Config,
@@ -19,7 +19,7 @@ pub struct AppState {
     pub config: Config,
     pub db: PgPool,
     pub started_at: DateTime<Utc>,
-    pub chat_tx: broadcast::Sender<ChatEvent>,
+    pub chat_channels: Arc<AsyncMutex<HashMap<String, broadcast::Sender<ChatEvent>>>>,
     pub rescue_tx: broadcast::Sender<RescueEvent>,
     pub feed_tx: broadcast::Sender<FeedEvent>,
     pub email: EmailService,
@@ -37,12 +37,12 @@ impl AppState {
             .connect_lazy(&config.database_url)?;
         ensure_runtime_schema(&db, config.postgis_enabled).await?;
 
-        let (chat_tx, _) = broadcast::channel(1024);
+        let chat_channels = Arc::new(AsyncMutex::new(HashMap::new()));
         let (rescue_tx, _) = broadcast::channel(4096);
         let (feed_tx, _) = broadcast::channel(4096);
         let email = EmailService::new(config.clone());
         let event_bus = EventBus::connect(&config).await?;
-        event_bus.spawn_bridge(chat_tx.clone(), rescue_tx.clone(), feed_tx.clone());
+        event_bus.spawn_bridge(chat_channels.clone(), rescue_tx.clone(), feed_tx.clone());
         let redis = if config.app_env == "test" {
             None
         } else {
@@ -55,7 +55,7 @@ impl AppState {
             config,
             db,
             started_at: Utc::now(),
-            chat_tx,
+            chat_channels,
             rescue_tx,
             feed_tx,
             email,
@@ -129,6 +129,29 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         "CREATE INDEX IF NOT EXISTS chat_room_members_user_idx ON chat_room_members (user_id, room_id);",
+        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS idempotency_key text;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_sender_idempotency_idx ON chat_messages (room_id, sender_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_ws_tickets (
+          token_hash text PRIMARY KEY,
+          room_id uuid NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          expires_at timestamptz NOT NULL,
+          consumed_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS chat_ws_tickets_expiry_idx ON chat_ws_tickets (expires_at);",
+        r#"
+        CREATE TABLE IF NOT EXISTS chat_user_blocks (
+          blocker_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          blocked_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (blocker_id, blocked_id),
+          CHECK (blocker_id <> blocked_id)
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS chat_user_blocks_blocked_idx ON chat_user_blocks (blocked_id, blocker_id);",
         r#"
         CREATE TABLE IF NOT EXISTS media_upload_intents (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -505,9 +528,26 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
 pub struct ChatEvent {
     pub room_id: String,
     pub message_id: String,
-    pub sender_id: String,
-    pub body: String,
-    pub created_at: String,
+}
+
+impl AppState {
+    pub async fn subscribe_chat_room(&self, room_id: &str) -> broadcast::Receiver<ChatEvent> {
+        let mut channels = self.chat_channels.lock().await;
+        channels
+            .entry(room_id.to_string())
+            .or_insert_with(|| broadcast::channel(256).0)
+            .subscribe()
+    }
+
+    pub async fn deliver_chat_event(&self, event: ChatEvent) {
+        let channel = {
+            let channels = self.chat_channels.lock().await;
+            channels.get(&event.room_id).cloned()
+        };
+        if let Some(channel) = channel {
+            let _ = channel.send(event);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
