@@ -421,7 +421,7 @@ async fn process_standard_phase(
 ) -> Result<(), sqlx::Error> {
     let candidates = ranked_candidates(tx, post, phase).await?;
     let candidate_count = candidates.len() as i32;
-    let alert = alert_for_candidates(&post, phase, candidates);
+    let alert = alert_for_candidates(&post, phase, candidates)?;
     let recipient_count = alert.recipients.len() as i32;
     persist_rescue_alert_tx(tx, &alert).await?;
 
@@ -801,8 +801,11 @@ async fn load_post_for_fanout(
           p.created_at,
           p.contact,
           p.tags,
-          COALESCE(p.latitude, -23.5505) AS latitude,
-          COALESCE(p.longitude, -46.6333) AS longitude,
+          p.latitude,
+          p.longitude,
+          p.geo_status,
+          p.geo_source,
+          p.route_public,
           u.id::text AS author_id,
           u.name AS author_name,
           u.avatar_url AS author_avatar,
@@ -858,7 +861,16 @@ async fn load_post_for_fanout(
         tags: row.get("tags"),
         latitude: row.get("latitude"),
         longitude: row.get("longitude"),
+        geo_status: row.get("geo_status"),
+        geo_source: row.get("geo_source"),
+        route_public: row.get("route_public"),
         rescue_operational: None,
+    })
+}
+
+fn confirmed_coords(post: &Post) -> Result<(f64, f64), sqlx::Error> {
+    post.latitude.zip(post.longitude).ok_or_else(|| {
+        sqlx::Error::Protocol("fanout requires confirmed post coordinates".into())
     })
 }
 
@@ -867,8 +879,9 @@ async fn ranked_candidates(
     post: &Post,
     phase: FanoutPhase,
 ) -> Result<Vec<Candidate>, sqlx::Error> {
+    let (lat, lng) = confirmed_coords(post)?;
     let lat_delta = phase.radius_km / EARTH_KM_PER_DEGREE;
-    let lng_delta = longitude_delta_for_radius(post.latitude, phase.radius_km);
+    let lng_delta = longitude_delta_for_radius(lat, phase.radius_km);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -917,10 +930,10 @@ async fn ranked_candidates(
         "#,
     )
     .bind(ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES as i32)
-    .bind(post.latitude - lat_delta)
-    .bind(post.latitude + lat_delta)
-    .bind(post.longitude - lng_delta)
-    .bind(post.longitude + lng_delta)
+    .bind(lat - lat_delta)
+    .bind(lat + lat_delta)
+    .bind(lng - lng_delta)
+    .bind(lng + lng_delta)
     .bind(format!("rescue:{}", post.id))
     .bind(phase.verified_escalation)
     .fetch_all(&mut **tx)
@@ -928,12 +941,7 @@ async fn ranked_candidates(
 
     let mut candidates = Vec::new();
     for row in rows {
-        let distance = haversine_km(
-            post.latitude,
-            post.longitude,
-            row.get("lat"),
-            row.get("lng"),
-        );
+        let distance = haversine_km(lat, lng, row.get("lat"), row.get("lng"));
         let subscription_radius: f64 = row.get("radius_km");
         if distance > phase.radius_km.min(subscription_radius) {
             continue;
@@ -987,8 +995,9 @@ async fn ranked_specialist_candidates(
     phase: EscalationPhase,
     scopes: &[String],
 ) -> Result<Vec<SpecialistCandidate>, sqlx::Error> {
+    let (post_lat, post_lng) = confirmed_coords(post)?;
     let lat_delta = phase.radius_km / EARTH_KM_PER_DEGREE;
-    let lng_delta = longitude_delta_for_radius(post.latitude, phase.radius_km);
+    let lng_delta = longitude_delta_for_radius(post_lat, phase.radius_km);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -1028,10 +1037,10 @@ async fn ranked_specialist_candidates(
           )
         "#,
     )
-    .bind(post.latitude - lat_delta)
-    .bind(post.latitude + lat_delta)
-    .bind(post.longitude - lng_delta)
-    .bind(post.longitude + lng_delta)
+    .bind(post_lat - lat_delta)
+    .bind(post_lat + lat_delta)
+    .bind(post_lng - lng_delta)
+    .bind(post_lng + lng_delta)
     .bind(scopes)
     .fetch_all(&mut **tx)
     .await?;
@@ -1040,7 +1049,7 @@ async fn ranked_specialist_candidates(
     for row in rows {
         let lat: f64 = row.get("lat");
         let lng: f64 = row.get("lng");
-        let distance = haversine_km(post.latitude, post.longitude, lat, lng);
+        let distance = haversine_km(post_lat, post_lng, lat, lng);
         let service_radius: f64 = row.get("service_radius_km");
         if distance > phase.radius_km || distance > service_radius {
             continue;
@@ -1101,9 +1110,10 @@ async fn ranked_verified_regional_fallback(
     post: &Post,
     phase: EscalationPhase,
 ) -> Result<Vec<SpecialistCandidate>, sqlx::Error> {
+    let (post_lat, post_lng) = confirmed_coords(post)?;
     let capped_radius = phase.radius_km.min(50.0);
     let lat_delta = capped_radius / EARTH_KM_PER_DEGREE;
-    let lng_delta = longitude_delta_for_radius(post.latitude, capped_radius);
+    let lng_delta = longitude_delta_for_radius(post_lat, capped_radius);
     let rows = sqlx::query(
         r#"
         SELECT
@@ -1139,22 +1149,17 @@ async fn ranked_verified_regional_fallback(
           )
         "#,
     )
-    .bind(post.latitude - lat_delta)
-    .bind(post.latitude + lat_delta)
-    .bind(post.longitude - lng_delta)
-    .bind(post.longitude + lng_delta)
+    .bind(post_lat - lat_delta)
+    .bind(post_lat + lat_delta)
+    .bind(post_lng - lng_delta)
+    .bind(post_lng + lng_delta)
     .bind(format!("rescue-escalation:{}:{}", post.id, phase.phase))
     .fetch_all(&mut **tx)
     .await?;
 
     let mut candidates = Vec::new();
     for row in rows {
-        let distance = haversine_km(
-            post.latitude,
-            post.longitude,
-            row.get("lat"),
-            row.get("lng"),
-        );
+        let distance = haversine_km(post_lat, post_lng, row.get("lat"), row.get("lng"));
         if distance > capped_radius
             || row.get::<i32, _>("recent_60m") >= MAX_RECENT_RESCUE_ALERTS_60M
         {
@@ -1192,8 +1197,9 @@ fn alert_for_candidates(
     post: &Post,
     phase: FanoutPhase,
     candidates: Vec<Candidate>,
-) -> RescueAlert {
-    RescueAlert {
+) -> Result<RescueAlert, sqlx::Error> {
+    let (lat, lng) = confirmed_coords(post)?;
+    Ok(RescueAlert {
         id: Uuid::now_v7().to_string(),
         post_id: post.id.clone(),
         title: if post.urgent {
@@ -1206,8 +1212,8 @@ fn alert_for_candidates(
             post.name, post.neighborhood
         ),
         image_url: post.image.clone(),
-        lat: post.latitude,
-        lng: post.longitude,
+        lat,
+        lng,
         radius_km: phase.radius_km,
         critical: post.urgent,
         actions: vec![
@@ -1234,7 +1240,7 @@ fn alert_for_candidates(
             })
             .collect(),
         created_at: Utc::now().to_rfc3339(),
-    }
+    })
 }
 
 fn candidate_score(
