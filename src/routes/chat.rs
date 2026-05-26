@@ -12,6 +12,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use sqlx::Row;
 use uuid::Uuid;
 use validator::Validate;
@@ -38,7 +39,7 @@ pub struct SendMessageResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct WsAuthQuery {
-    pub access_token: Option<String>,
+    pub ticket: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,10 +48,44 @@ pub struct ListRoomsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListMessagesQuery {
+    pub before: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRoomRequest {
     pub post_id: Option<String>,
     pub participant_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadRoomRequest {
+    pub through_message_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsTicketResponse {
+    pub ticket: String,
+    pub expires_at: String,
+}
+
+#[derive(Serialize)]
+pub struct ChatActionResponse {
+    pub status: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatRealtimePayload {
+    room_id: String,
+    message_id: String,
+    sender_id: String,
+    body: String,
+    created_at: String,
 }
 
 pub async fn list_rooms(
@@ -115,6 +150,13 @@ pub async fn open_room(
 ) -> Result<(StatusCode, Json<ChatConversation>), ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let requester_id = parse_claim_user_id(&claims)?;
+    rate_limit::check_key(
+        &state,
+        &format!("chat:room:create:{requester_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let mut tx = state.db.begin().await?;
     let (room_id, participant_id) = match (
         payload.post_id.as_deref(),
@@ -133,6 +175,7 @@ pub async fn open_room(
                     "cannot open a chat with your own post".into(),
                 ));
             }
+            ensure_contact_allowed(&state, requester_id, author_id).await?;
 
             let room_id: Uuid = sqlx::query_scalar(
                 r#"
@@ -165,6 +208,7 @@ pub async fn open_room(
             if exists.is_none() {
                 return Err(ApiError::NotFound);
             }
+            ensure_contact_allowed(&state, requester_id, participant_id).await?;
 
             let mut members = [requester_id.to_string(), participant_id.to_string()];
             members.sort();
@@ -224,23 +268,34 @@ pub async fn list_messages(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let current_user_id = parse_claim_user_id(&claims)?;
     let room_id = parse_uuid(&id)?;
     ensure_room_member(&state, room_id, current_user_id).await?;
-    mark_room_read(&state, room_id, current_user_id).await?;
+    let before_id = query.before.as_deref().map(parse_uuid).transpose()?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
 
     let rows = sqlx::query(
         r#"
         SELECT id, sender_id, body, created_at
         FROM chat_messages
         WHERE room_id = $1
+          AND (
+            $2::uuid IS NULL OR (created_at, id) < (
+              SELECT created_at, id
+              FROM chat_messages
+              WHERE room_id = $1 AND id = $2
+            )
+          )
         ORDER BY created_at DESC
-        LIMIT 100
+        LIMIT $3
         "#,
     )
     .bind(room_id)
+    .bind(before_id)
+    .bind(limit)
     .fetch_all(&state.db)
     .await?;
 
@@ -268,25 +323,99 @@ pub async fn send_message(
     )
     .await?;
     ensure_room_member(&state, room_id, sender_id).await?;
+    ensure_room_send_allowed(&state, room_id, sender_id).await?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|header| header.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| ApiError::Validation("idempotency-key is required for chat messages".into()))?;
+    if idempotency_key.len() > 160 {
+        return Err(ApiError::Validation("idempotency-key is too long".into()));
+    }
 
-    let message = persist_chat_message(&state, room_id, sender_id, payload.body).await?;
-    broadcast_chat_message(&state, &room_id.to_string(), &message);
+    let (message, inserted) =
+        persist_chat_message(&state, room_id, sender_id, payload.body, Some(&idempotency_key)).await?;
+    if inserted {
+        broadcast_chat_message(&state, &room_id.to_string(), &message).await;
+    }
 
-    Ok((StatusCode::CREATED, Json(SendMessageResponse { message })))
+    Ok((
+        if inserted { StatusCode::CREATED } else { StatusCode::OK },
+        Json(SendMessageResponse { message }),
+    ))
+}
+
+pub async fn mark_read(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<ReadRoomRequest>,
+) -> Result<Json<ChatActionResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = parse_claim_user_id(&claims)?;
+    let room_id = parse_uuid(&id)?;
+    let through_message_id = parse_uuid(&payload.through_message_id)?;
+    ensure_room_member(&state, room_id, user_id).await?;
+
+    let read_at: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT created_at FROM chat_messages WHERE id = $1 AND room_id = $2",
+    )
+    .bind(through_message_id)
+    .bind(room_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    mark_room_read(&state, room_id, user_id, read_at).await?;
+    Ok(Json(ChatActionResponse { status: "read" }))
+}
+
+pub async fn create_ws_ticket(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<WsTicketResponse>), ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = parse_claim_user_id(&claims)?;
+    let room_id = parse_uuid(&id)?;
+    ensure_room_member(&state, room_id, user_id).await?;
+
+    let ticket = format!("{}.{}", Uuid::now_v7(), Uuid::now_v7());
+    let token_hash = hash_ticket(&ticket);
+    let expires_at = Utc::now() + chrono::Duration::seconds(45);
+    sqlx::query("DELETE FROM chat_ws_tickets WHERE expires_at < now() OR consumed_at IS NOT NULL")
+        .execute(&state.db)
+        .await?;
+    sqlx::query(
+        "INSERT INTO chat_ws_tickets (token_hash, room_id, user_id, expires_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(token_hash)
+    .bind(room_id)
+    .bind(user_id)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(WsTicketResponse {
+            ticket,
+            expires_at: expires_at.to_rfc3339(),
+        }),
+    ))
 }
 
 pub async fn room_ws(
-    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WsAuthQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let claims = authenticate_socket(&state, &headers, query.access_token.as_deref())?;
     let room_id = parse_uuid(&id)?;
-    let sender_id = parse_claim_user_id(&claims)?;
+    let sender_id = consume_ws_ticket(&state, room_id, query.ticket.as_deref()).await?;
     ensure_room_member(&state, room_id, sender_id).await?;
-    mark_room_read(&state, room_id, sender_id).await?;
 
     Ok(ws.on_upgrade(move |socket| handle_socket(state, room_id, sender_id, socket)))
 }
@@ -294,35 +423,14 @@ pub async fn room_ws(
 async fn handle_socket(state: AppState, room_id: Uuid, sender_user_id: Uuid, socket: WebSocket) {
     let room_id_str = room_id.to_string();
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = state.chat_tx.subscribe();
+    let mut rx = state.subscribe_chat_room(&room_id_str).await;
 
     loop {
         tokio::select! {
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        let body = text.trim();
-                        if body.is_empty() || body.len() > 2000 {
-                            continue;
-                        }
-                        if rate_limit::check_key(
-                            &state,
-                            &format!("chat:ws:{sender_user_id}"),
-                            state.config.throttle_limit * 2,
-                            StdDuration::from_secs(state.config.throttle_ttl_seconds),
-                        )
-                        .await
-                        .is_err()
-                        {
-                            continue;
-                        }
-                        match persist_chat_message(&state, room_id, sender_user_id, body.to_string()).await {
-                            Ok(message) => broadcast_chat_message(&state, &room_id_str, &message),
-                            Err(error) => {
-                                tracing::warn!(?error, %room_id, "websocket message was not persisted");
-                                break;
-                            }
-                        }
+                        tracing::debug!(%room_id, %sender_user_id, frame_length = text.len(), "websocket write frame ignored; REST message endpoint is required");
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(payload))) => {
@@ -339,18 +447,27 @@ async fn handle_socket(state: AppState, room_id: Uuid, sender_user_id: Uuid, soc
             }
             event = rx.recv() => {
                 match event {
-                    Ok(event) if event.room_id == room_id_str => {
-                        if event.sender_id != sender_user_id.to_string() {
-                            let _ = mark_room_read(&state, room_id, sender_user_id).await;
+                    Ok(event) => {
+                        if ensure_room_send_allowed(&state, room_id, sender_user_id).await.is_err() {
+                            continue;
                         }
-                        let Ok(payload) = serde_json::to_string(&event) else {
+                        let Ok(Some(message)) = load_chat_message(&state, room_id, &event.message_id).await else {
+                            continue;
+                        };
+                        let payload = ChatRealtimePayload {
+                            room_id: room_id_str.clone(),
+                            message_id: message.id,
+                            sender_id: message.sender_id,
+                            body: message.body,
+                            created_at: message.created_at,
+                        };
+                        let Ok(payload) = serde_json::to_string(&payload) else {
                             continue;
                         };
                         if sender.send(Message::Text(payload)).await.is_err() {
                             break;
                         }
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         tracing::debug!(?error, %room_id, "chat broadcast receive error");
                         break;
@@ -426,12 +543,22 @@ async fn ensure_room_member(
     exists.map(|_| ()).ok_or(ApiError::Forbidden)
 }
 
-async fn mark_room_read(state: &AppState, room_id: Uuid, user_id: Uuid) -> Result<(), ApiError> {
+async fn mark_room_read(
+    state: &AppState,
+    room_id: Uuid,
+    user_id: Uuid,
+    read_at: DateTime<Utc>,
+) -> Result<(), ApiError> {
     sqlx::query(
-        "UPDATE chat_room_members SET last_read_at = now() WHERE room_id = $1 AND user_id = $2",
+        r#"
+        UPDATE chat_room_members
+        SET last_read_at = GREATEST(COALESCE(last_read_at, '-infinity'::timestamptz), $3)
+        WHERE room_id = $1 AND user_id = $2
+        "#,
     )
     .bind(room_id)
     .bind(user_id)
+    .bind(read_at)
     .execute(&state.db)
     .await?;
     Ok(())
@@ -442,13 +569,39 @@ async fn persist_chat_message(
     room_id: Uuid,
     sender_id: Uuid,
     body: String,
-) -> Result<ChatMessage, ApiError> {
+    idempotency_key: Option<&str>,
+) -> Result<(ChatMessage, bool), ApiError> {
+    if let Some(idempotency_key) = idempotency_key {
+        let row = sqlx::query(
+            r#"
+            WITH inserted AS (
+              INSERT INTO chat_messages (room_id, sender_id, body, idempotency_key)
+              VALUES ($1, $2, $3, $4)
+              ON CONFLICT (room_id, sender_id, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+              DO NOTHING
+              RETURNING id, sender_id, body, created_at, true AS inserted
+            )
+            SELECT id, sender_id, body, created_at, inserted FROM inserted
+            UNION ALL
+            SELECT id, sender_id, body, created_at, false AS inserted
+            FROM chat_messages
+            WHERE room_id = $1 AND sender_id = $2 AND idempotency_key = $4
+            LIMIT 1
+            "#,
+        )
+        .bind(room_id)
+        .bind(sender_id)
+        .bind(body)
+        .bind(idempotency_key)
+        .fetch_one(&state.db)
+        .await?;
+        let inserted: bool = row.get("inserted");
+        return Ok((row_to_message(row), inserted));
+    }
+
     let row = sqlx::query(
-        r#"
-        INSERT INTO chat_messages (room_id, sender_id, body)
-        VALUES ($1, $2, $3)
-        RETURNING id, sender_id, body, created_at
-        "#,
+        "INSERT INTO chat_messages (room_id, sender_id, body) VALUES ($1, $2, $3) RETURNING id, sender_id, body, created_at",
     )
     .bind(room_id)
     .bind(sender_id)
@@ -456,7 +609,7 @@ async fn persist_chat_message(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(row_to_message(row))
+    Ok((row_to_message(row), true))
 }
 
 fn row_to_conversation(row: sqlx::postgres::PgRow) -> ChatConversation {
@@ -486,15 +639,12 @@ fn row_to_message(row: sqlx::postgres::PgRow) -> ChatMessage {
     }
 }
 
-fn broadcast_chat_message(state: &AppState, room_id: &str, message: &ChatMessage) {
+async fn broadcast_chat_message(state: &AppState, room_id: &str, message: &ChatMessage) {
     let event = ChatEvent {
         room_id: room_id.into(),
         message_id: message.id.clone(),
-        sender_id: message.sender_id.clone(),
-        body: message.body.clone(),
-        created_at: message.created_at.clone(),
     };
-    let _ = state.chat_tx.send(event.clone());
+    state.deliver_chat_event(event.clone()).await;
     let bus = state.event_bus.clone();
     tokio::spawn(async move {
         bus.publish_chat(&event).await;
@@ -509,20 +659,129 @@ fn parse_claim_user_id(claims: &auth_service::AccessClaims) -> Result<Uuid, ApiE
     Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)
 }
 
-fn authenticate_socket(
+async fn consume_ws_ticket(
     state: &AppState,
-    headers: &HeaderMap,
-    query_token: Option<&str>,
-) -> Result<auth_service::AccessClaims, ApiError> {
-    if headers.get(axum::http::header::AUTHORIZATION).is_some() {
-        return authenticate_request(state, headers);
-    }
-
-    let token = query_token
+    room_id: Uuid,
+    ticket: Option<&str>,
+) -> Result<Uuid, ApiError> {
+    let ticket = ticket
         .filter(|value| !value.trim().is_empty())
         .ok_or(ApiError::Unauthorized)?;
+    let token_hash = hash_ticket(ticket);
+    sqlx::query_scalar(
+        r#"
+        UPDATE chat_ws_tickets
+        SET consumed_at = now()
+        WHERE token_hash = $1
+          AND room_id = $2
+          AND consumed_at IS NULL
+          AND expires_at > now()
+        RETURNING user_id
+        "#,
+    )
+    .bind(token_hash)
+    .bind(room_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::Unauthorized)
+}
 
-    auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
+async fn load_chat_message(
+    state: &AppState,
+    room_id: Uuid,
+    message_id: &str,
+) -> Result<Option<ChatMessage>, ApiError> {
+    let message_id = parse_uuid(message_id)?;
+    let row = sqlx::query(
+        "SELECT id, sender_id, body, created_at FROM chat_messages WHERE id = $1 AND room_id = $2",
+    )
+    .bind(message_id)
+    .bind(room_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row.map(row_to_message))
+}
+
+async fn ensure_contact_allowed(
+    state: &AppState,
+    user_id: Uuid,
+    participant_id: Uuid,
+) -> Result<(), ApiError> {
+    let blocked: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+          SELECT 1 FROM chat_user_blocks
+          WHERE (blocker_id = $1 AND blocked_id = $2)
+             OR (blocker_id = $2 AND blocked_id = $1)
+        )
+        "#,
+    )
+    .bind(user_id)
+    .bind(participant_id)
+    .fetch_one(&state.db)
+    .await?;
+    if blocked {
+        Err(ApiError::Forbidden)
+    } else {
+        Ok(())
+    }
+}
+
+async fn ensure_room_send_allowed(
+    state: &AppState,
+    room_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    let participant_id: Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM chat_room_members WHERE room_id = $1 AND user_id <> $2 LIMIT 1",
+    )
+    .bind(room_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::Forbidden)?;
+    ensure_contact_allowed(state, user_id, participant_id).await
+}
+
+pub async fn block_participant(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ChatActionResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let blocker_id = parse_claim_user_id(&claims)?;
+    let blocked_id = parse_uuid(&id)?;
+    if blocker_id == blocked_id {
+        return Err(ApiError::Validation("cannot block yourself".into()));
+    }
+    sqlx::query(
+        "INSERT INTO chat_user_blocks (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(blocker_id)
+    .bind(blocked_id)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(ChatActionResponse { status: "blocked" }))
+}
+
+pub async fn unblock_participant(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ChatActionResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let blocker_id = parse_claim_user_id(&claims)?;
+    let blocked_id = parse_uuid(&id)?;
+    sqlx::query("DELETE FROM chat_user_blocks WHERE blocker_id = $1 AND blocked_id = $2")
+        .bind(blocker_id)
+        .bind(blocked_id)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(ChatActionResponse { status: "unblocked" }))
+}
+
+fn hash_ticket(ticket: &str) -> String {
+    format!("{:x}", Sha1::digest(ticket.as_bytes()))
 }
 
 fn format_timestamp(value: DateTime<Utc>) -> String {
