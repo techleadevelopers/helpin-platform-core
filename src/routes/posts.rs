@@ -54,6 +54,12 @@ fn authenticate_request(
     auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
 }
 
+pub(crate) fn optional_authenticated_user_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
+    authenticate_request(state, headers)
+        .ok()
+        .and_then(|claims| Uuid::parse_str(&claims.sub).ok())
+}
+
 pub async fn load_author(state: &AppState, user_id: Uuid) -> Result<Author, ApiError> {
     let row = sqlx::query(
         r#"
@@ -196,6 +202,7 @@ pub struct CreatePostResponse {
 pub struct LikeResponse {
     pub post_id: String,
     pub liked: bool,
+    pub likes: u32,
 }
 
 #[derive(Serialize)]
@@ -403,7 +410,7 @@ pub async fn create_post(
         .fetch_optional(&state.db)
         .await?
         {
-            if let Some(post) = load_post_by_id(&state, existing_id).await? {
+            if let Some(post) = load_post_by_id(&state, existing_id, None).await? {
                 return Ok((
                     StatusCode::OK,
                     Json(CreatePostResponse {
@@ -580,6 +587,7 @@ pub async fn create_post(
         text_only,
         author,
         likes: 0,
+        liked_by_me: false,
         comments: 0,
         shares: 0,
         urgent: is_urgent,
@@ -690,11 +698,13 @@ fn normalize_media(payload: &CreatePostRequest) -> Result<Vec<PostMedia>, ApiErr
 }
 
 pub async fn get_post(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Post>, ApiError> {
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
-    load_post_by_id(&state, post_id)
+    let viewer_id = optional_authenticated_user_id(&state, &headers);
+    load_post_by_id(&state, post_id, viewer_id)
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
@@ -738,7 +748,7 @@ pub async fn delete_post(
     Ok(Json(DeletePostResponse { status: "deleted" }))
 }
 
-pub async fn toggle_like(
+pub async fn like_post(
     headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -756,36 +766,78 @@ pub async fn toggle_like(
     ensure_post_exists(&state, post_id).await?;
 
     let mut tx = state.db.begin().await?;
-    let deleted = sqlx::query("DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2")
+    sqlx::query(
+        "INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2) ON CONFLICT (post_id, user_id) DO NOTHING",
+    )
         .bind(post_id)
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    let liked = if deleted.rows_affected() == 0 {
-        sqlx::query("INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2)")
-            .bind(post_id)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-        true
-    } else {
-        false
-    };
-    sqlx::query(
+    let likes = sqlx::query_scalar::<_, i32>(
         r#"
         UPDATE posts
         SET likes_count = (
           SELECT COUNT(*)::int FROM post_likes WHERE post_id = $1
         )
         WHERE id = $1
+        RETURNING likes_count
         "#,
     )
     .bind(post_id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
 
-    Ok(Json(LikeResponse { post_id: id, liked }))
+    Ok(Json(LikeResponse {
+        post_id: id,
+        liked: true,
+        likes: likes.max(0) as u32,
+    }))
+}
+
+pub async fn unlike_post(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<LikeResponse>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:unlike:{user_id}"),
+        state.config.throttle_limit * 6,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2")
+        .bind(post_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    let likes = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE posts
+        SET likes_count = (
+          SELECT COUNT(*)::int FROM post_likes WHERE post_id = $1
+        )
+        WHERE id = $1
+        RETURNING likes_count
+        "#,
+    )
+    .bind(post_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(Json(LikeResponse {
+        post_id: id,
+        liked: false,
+        likes: likes.max(0) as u32,
+    }))
 }
 
 pub async fn create_comment(
@@ -1049,6 +1101,7 @@ async fn ensure_post_exists(state: &AppState, post_id: Uuid) -> Result<(), ApiEr
 pub(crate) async fn load_post_by_id(
     state: &AppState,
     post_id: Uuid,
+    viewer_id: Option<Uuid>,
 ) -> Result<Option<Post>, sqlx::Error> {
     let row = sqlx::query(
         r#"
@@ -1071,6 +1124,9 @@ pub(crate) async fn load_post_by_id(
             ) AS image,
             p.text_only,
             p.likes_count,
+            ($2::uuid IS NOT NULL AND EXISTS (
+                SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2
+            )) AS liked_by_me,
             p.comments_count,
             p.shares_count,
             p.urgent,
@@ -1098,6 +1154,7 @@ pub(crate) async fn load_post_by_id(
         "#,
     )
     .bind(post_id)
+    .bind(viewer_id)
     .fetch_optional(&state.db)
     .await?;
 
@@ -1136,6 +1193,7 @@ pub(crate) async fn load_post_by_id(
                 account_type: author_type,
             },
             likes: row.get::<i32, _>("likes_count").max(0) as u32,
+            liked_by_me: row.get("liked_by_me"),
             comments: row.get::<i32, _>("comments_count").max(0) as u32,
             shares: row.get::<i32, _>("shares_count").max(0) as u32,
             urgent: row.get("urgent"),
