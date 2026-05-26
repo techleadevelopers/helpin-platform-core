@@ -1,4 +1,7 @@
+use std::{collections::HashMap, sync::Arc};
+
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
 use crate::{
@@ -69,9 +72,9 @@ impl EventBus {
 
     pub fn spawn_bridge(
         &self,
-        chat_tx: tokio::sync::broadcast::Sender<ChatEvent>,
-        rescue_tx: tokio::sync::broadcast::Sender<RescueEvent>,
-        feed_tx: tokio::sync::broadcast::Sender<FeedEvent>,
+        chat_channels: Arc<Mutex<HashMap<String, broadcast::Sender<ChatEvent>>>>,
+        rescue_tx: broadcast::Sender<RescueEvent>,
+        feed_tx: broadcast::Sender<FeedEvent>,
     ) {
         let Some(client) = self.client.clone() else {
             return;
@@ -82,7 +85,16 @@ impl EventBus {
             self.origin_id.clone(),
             CHAT_MESSAGES_SUBJECT,
             move |event| {
-                let _ = chat_tx.send(event);
+                let chat_channels = chat_channels.clone();
+                tokio::spawn(async move {
+                    let channel = {
+                        let channels = chat_channels.lock().await;
+                        channels.get(&event.room_id).cloned()
+                    };
+                    if let Some(channel) = channel {
+                        let _ = channel.send(event);
+                    }
+                });
             },
         );
         spawn_subscription(
