@@ -347,6 +347,28 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "#,
         "CREATE INDEX IF NOT EXISTS post_reports_status_created_idx ON post_reports (status, created_at);",
         r#"
+        CREATE TABLE IF NOT EXISTS support_tickets (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          subject text NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 160),
+          status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'pending', 'resolved', 'closed')),
+          category text NOT NULL DEFAULT 'OTHER',
+          severity text NOT NULL DEFAULT 'MEDIUM',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS support_tickets_status_created_idx ON support_tickets (status, created_at DESC);",
+        r#"
+        CREATE TABLE IF NOT EXISTS support_ticket_messages (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          ticket_id uuid NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+          body text NOT NULL CHECK (char_length(body) BETWEEN 1 AND 4000),
+          author_type text NOT NULL DEFAULT 'user' CHECK (author_type IN ('user', 'support', 'system')),
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS support_ticket_messages_ticket_created_idx ON support_ticket_messages (ticket_id, created_at ASC);",
+        r#"
         CREATE TABLE IF NOT EXISTS rescue_sessions (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
           post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
