@@ -845,6 +845,7 @@ async fn load_post_for_fanout(
             account_type: author_type,
         },
         likes: row.get::<i32, _>("likes_count").max(0) as u32,
+        liked_by_me: false,
         comments: row.get::<i32, _>("comments_count").max(0) as u32,
         shares: row.get::<i32, _>("shares_count").max(0) as u32,
         urgent: row.get("urgent"),
