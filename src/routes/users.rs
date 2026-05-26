@@ -9,7 +9,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    domain::{AccountType, Author, Post},
+    domain::{AccountType, Post},
     error::ApiError,
     routes::{
         auth::authenticate_request,
@@ -227,7 +227,7 @@ async fn load_profile_posts(
 ) -> Result<Vec<Post>, ApiError> {
     let mut posts = load_db_posts(
         state,
-        FeedQuery {
+        &FeedQuery {
             post_type: None,
             author_type: None,
             urgent: None,
@@ -279,7 +279,7 @@ fn public_location(
     let (neighborhood, city, state) = if matches!(account_type, AccountType::Ong) {
         (ong_neighborhood, ong_city, ong_state)
     } else {
-        (None, user_city, user_state)
+        (user_neighborhood, user_city, user_state)
     };
     [neighborhood, city, state.map(|value| value.to_uppercase())]
         .into_iter()
@@ -288,4 +288,3 @@ fn public_location(
         .collect::<Vec<_>>()
         .join(", ")
 }
-
