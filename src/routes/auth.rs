@@ -68,6 +68,13 @@ pub struct UserProfile {
     pub profile_address: Option<ProfileAddress>,
 }
 
+#[derive(Default)]
+struct UserStats {
+    posts_count: u32,
+    helped_count: u32,
+    adoptions_count: u32,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResponse {
@@ -128,12 +135,19 @@ pub struct UpdateAvatarResponse {
 pub struct UpdateProfileRequest {
     #[validate(length(min = 2, max = 120))]
     pub name: String,
+    #[validate(length(min = 0, max = 8))]
     pub cep: Option<String>,
+    #[validate(length(min = 0, max = 160))]
     pub street: Option<String>,
+    #[validate(length(min = 0, max = 20))]
     pub number: Option<String>,
+    #[validate(length(min = 0, max = 80))]
     pub complement: Option<String>,
+    #[validate(length(min = 0, max = 120))]
     pub neighborhood: Option<String>,
+    #[validate(length(min = 0, max = 120))]
     pub city: Option<String>,
+    #[validate(length(min = 0, max = 2))]
     pub state: Option<String>,
 }
 
@@ -444,7 +458,7 @@ pub async fn me(
         None
     };
 
-    Ok(Json(current_user_response(record, ong_record)))
+    Ok(Json(current_user_response(&state, record, ong_record).await))
 }
 
 pub async fn delete_account(
@@ -505,6 +519,14 @@ pub async fn update_avatar(
         .map_err(|e| ApiError::Validation(e.to_string()))?;
     let claims = authenticate_request(&state, &headers)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("profile:avatar:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+    validate_owned_avatar_url(&state, user_id, &payload.avatar_url).await?;
 
     sqlx::query("UPDATE users SET avatar_url = $1 WHERE id = $2")
         .bind(&payload.avatar_url)
@@ -536,13 +558,29 @@ pub async fn update_profile(
 
     let claims = authenticate_request(&state, &headers)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("profile:update:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     let name = payload.name.trim().to_string();
     let cep = normalize_optional(payload.cep.as_deref());
+    if cep
+        .as_deref()
+        .is_some_and(|value| value.len() != 8 || !value.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return Err(ApiError::Validation("cep must contain 8 digits".into()));
+    }
     let street = normalize_optional(payload.street.as_deref());
     let number = normalize_optional(payload.number.as_deref());
     let complement = normalize_optional(payload.complement.as_deref());
     let neighborhood = normalize_optional(payload.neighborhood.as_deref());
     let city = normalize_optional(payload.city.as_deref());
+    if city.is_some() ^ state_code.is_some() {
+        return Err(ApiError::Validation("city and state must be sent together".into()));
+    }
 
     let mut tx = state.db.begin().await?;
     let updated = sqlx::query(
@@ -600,7 +638,7 @@ pub async fn update_profile(
         None
     };
 
-    Ok(Json(current_user_response(record, ong_record)))
+    Ok(Json(current_user_response(&state, record, ong_record).await))
 }
 
 #[derive(Debug)]
@@ -953,6 +991,7 @@ async fn issue_auth_response(
     })?;
 
     let profile_address = profile_address_from_record(&record);
+    let stats = user_stats(state, record.id).await.unwrap_or_default();
     Ok(auth_response(
         &record.id.to_string(),
         &record.name,
@@ -963,6 +1002,7 @@ async fn issue_auth_response(
         record.gender,
         profile_address,
         ong_record,
+        stats,
         access_token,
         refresh_token,
     ))
@@ -995,6 +1035,7 @@ fn issue_fallback_response(
         gender,
         None,
         ong_record,
+        UserStats::default(),
         access_token,
         auth_service::new_refresh_token(),
     ))
@@ -1010,6 +1051,7 @@ fn auth_response(
     gender: Option<String>,
     profile_address: Option<ProfileAddress>,
     ong_record: Option<OngRecord>,
+    stats: UserStats,
     access_token: String,
     refresh_token: String,
 ) -> AuthResponse {
@@ -1032,9 +1074,9 @@ fn auth_response(
             account_type,
             verified: user_verified,
             gender,
-            posts_count: 0,
-            helped_count: 0,
-            adoptions_count: 0,
+            posts_count: stats.posts_count,
+            helped_count: stats.helped_count,
+            adoptions_count: stats.adoptions_count,
             profile_address,
         },
         ong_profile: ong_record.map(|record| OngRegistrationProfile {
@@ -1058,7 +1100,11 @@ fn auth_response(
     }
 }
 
-fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> CurrentUserResponse {
+async fn current_user_response(
+    state: &AppState,
+    record: UserRecord,
+    ong_record: Option<OngRecord>,
+) -> CurrentUserResponse {
     let user_verified = if matches!(&record.account_type, AccountType::Ong) {
         ong_record
             .as_ref()
@@ -1069,6 +1115,7 @@ fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> C
     };
 
     let profile_address = profile_address_from_record(&record);
+    let stats = user_stats(state, record.id).await.unwrap_or_default();
 
     CurrentUserResponse {
         user: UserProfile {
@@ -1080,9 +1127,9 @@ fn current_user_response(record: UserRecord, ong_record: Option<OngRecord>) -> C
             account_type: record.account_type,
             verified: user_verified,
             gender: record.gender,
-            posts_count: 0,
-            helped_count: 0,
-            adoptions_count: 0,
+            posts_count: stats.posts_count,
+            helped_count: stats.helped_count,
+            adoptions_count: stats.adoptions_count,
             profile_address,
         },
         ong_profile: ong_record.map(|record| OngRegistrationProfile {
@@ -1128,6 +1175,87 @@ fn profile_address_from_record(record: &UserRecord) -> Option<ProfileAddress> {
         city: record.city.clone(),
         state: record.state.clone(),
     })
+}
+
+async fn user_stats(state: &AppState, user_id: Uuid) -> Result<UserStats, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+          COALESCE(posts.count, 0)::int AS posts_count,
+          COALESCE(helped.count, 0)::int AS helped_count,
+          COALESCE(adoptions.count, 0)::int AS adoptions_count
+        FROM users u
+        LEFT JOIN LATERAL (
+          SELECT count(*) FROM posts p
+          WHERE p.author_id = u.id AND p.moderation_status = 'approved'
+        ) posts ON true
+        LEFT JOIN LATERAL (
+          SELECT count(*) FROM rescue_responses rr
+          WHERE rr.user_id = u.id AND rr.status IN ('confirmed', 'arrived')
+        ) helped ON true
+        LEFT JOIN LATERAL (
+          SELECT count(*) FROM posts p
+          WHERE p.author_id = u.id AND p.post_type = 'adoption'
+            AND p.moderation_status = 'approved'
+        ) adoptions ON true
+        WHERE u.id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(UserStats {
+        posts_count: row.get::<i32, _>("posts_count").max(0) as u32,
+        helped_count: row.get::<i32, _>("helped_count").max(0) as u32,
+        adoptions_count: row.get::<i32, _>("adoptions_count").max(0) as u32,
+    })
+}
+
+async fn validate_owned_avatar_url(
+    state: &AppState,
+    user_id: Uuid,
+    avatar_url: &str,
+) -> Result<(), ApiError> {
+    let expected_prefix = format!(
+        "https://res.cloudinary.com/{}/image/upload/",
+        state.config.cloudinary_cloud_name
+    );
+    if !avatar_url.starts_with(&expected_prefix) {
+        return Err(ApiError::Validation(
+            "avatarUrl must be a ZooHelp Cloudinary image".into(),
+        ));
+    }
+    if !(avatar_url.contains("/zoohelp/profile-avatars/image/")
+        || avatar_url.contains("/zoohelp/ong-logos/image/"))
+    {
+        return Err(ApiError::Validation("avatarUrl purpose is not allowed".into()));
+    }
+
+    let owned: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+          SELECT 1 FROM media_upload_intents
+          WHERE user_id = $1
+            AND resource_type = 'image'
+            AND expires_at > now() - interval '1 day'
+            AND (
+              public_url = $2
+              OR $2 LIKE '%' || object_key || '%'
+            )
+        )
+        "#,
+    )
+    .bind(user_id)
+    .bind(avatar_url)
+    .fetch_one(&state.db)
+    .await?;
+    if !owned {
+        return Err(ApiError::Validation(
+            "avatarUrl must come from an upload intent owned by this user".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
