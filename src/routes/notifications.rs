@@ -185,7 +185,7 @@ pub async fn preview_rescue_alert(
     )
     .await?;
     let post_id = Uuid::parse_str(&post_id).map_err(|_| ApiError::NotFound)?;
-    let post = load_post_by_id(&state, post_id)
+    let post = load_post_by_id(&state, post_id, None)
         .await?
         .ok_or(ApiError::NotFound)?;
     if post.author.id != claims.sub && !matches!(claims.account_type, AccountType::Admin) {
