@@ -84,7 +84,7 @@ impl EventBus {
             client.clone(),
             self.origin_id.clone(),
             CHAT_MESSAGES_SUBJECT,
-            move |event| {
+            move |event: ChatEvent| {
                 let chat_channels = chat_channels.clone();
                 tokio::spawn(async move {
                     let channel = {
