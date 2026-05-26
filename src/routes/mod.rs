@@ -24,6 +24,7 @@ mod rescue;
 mod search;
 mod support;
 mod trust;
+mod users;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -103,6 +104,8 @@ pub fn router(state: AppState) -> Router {
             get(posts::list_comments).post(posts::create_comment),
         )
         .route("/v1/posts/:id/report", post(posts::report_post))
+        .route("/v1/users/:id", get(users::get_public_user_profile))
+        .route("/v1/users/:id/follow", post(users::follow_user))
         .route(
             "/v1/posts/:id/rescue-response",
             post(posts::rescue_response),
