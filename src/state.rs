@@ -51,7 +51,7 @@ impl AppState {
         crate::services::push_worker::spawn(config.clone(), db.clone());
         crate::services::rescue_fanout::spawn(config.rescue_fanout_worker_enabled, db.clone());
 
-        Ok(Self {
+        let state = Self {
             config,
             db,
             started_at: Utc::now(),
@@ -62,7 +62,9 @@ impl AppState {
             event_bus,
             redis,
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
-        })
+        };
+        crate::services::geocoding_worker::spawn(state.clone());
+        Ok(state)
     }
 }
 
@@ -115,6 +117,29 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS fraud_risk smallint NOT NULL DEFAULT 0 CHECK (fraud_risk BETWEEN 0 AND 100);",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS idempotency_key text;",
         "CREATE UNIQUE INDEX IF NOT EXISTS posts_author_idempotency_idx ON posts (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo_status text NOT NULL DEFAULT 'unavailable';",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo_source text;",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo_provider text;",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo_confidence double precision;",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS geo_resolved_at timestamptz;",
+        "ALTER TABLE posts ADD COLUMN IF NOT EXISTS route_public boolean NOT NULL DEFAULT false;",
+        "ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_geo_status_check;",
+        "ALTER TABLE posts ADD CONSTRAINT posts_geo_status_check CHECK (geo_status IN ('unavailable', 'pending', 'confirmed', 'failed'));",
+        "ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_geo_source_check;",
+        "ALTER TABLE posts ADD CONSTRAINT posts_geo_source_check CHECK (geo_source IS NULL OR geo_source IN ('gps_confirmed', 'address_geocoded'));",
+        r#"
+        CREATE TABLE IF NOT EXISTS post_geocode_jobs (
+          post_id uuid PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+          address_label text NOT NULL,
+          status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+          attempts integer NOT NULL DEFAULT 0,
+          last_error text,
+          next_run_at timestamptz NOT NULL DEFAULT now(),
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS post_geocode_jobs_due_idx ON post_geocode_jobs (status, next_run_at) WHERE status IN ('pending', 'processing');",
         "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES users(id) ON DELETE CASCADE;",
         "CREATE UNIQUE INDEX IF NOT EXISTS chat_rooms_private_post_requester_idx ON chat_rooms (post_id, requester_id) WHERE post_id IS NOT NULL AND requester_id IS NOT NULL;",
         "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS direct_pair_key text;",
