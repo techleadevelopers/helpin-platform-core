@@ -75,6 +75,10 @@ pub fn router(state: AppState) -> Router {
             patch(admin::review_moderation_job),
         )
         .route("/v1/admin/reports/posts", get(admin::list_post_reports))
+        .route(
+            "/v1/admin/reports/rescue-final",
+            get(admin::list_rescue_final_reports),
+        )
         .route("/v1/admin/queues/status", get(admin::queue_status))
         .route("/v1/admin/queues/:queue_name/jobs", get(admin::queue_jobs))
         .route(
