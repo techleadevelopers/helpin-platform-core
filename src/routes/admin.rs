@@ -1103,6 +1103,46 @@ fn row_to_post_report(row: sqlx::postgres::PgRow) -> PostReport {
     }
 }
 
+fn row_to_rescue_final_report_admin(row: sqlx::postgres::PgRow) -> RescueFinalReportAdmin {
+    RescueFinalReportAdmin {
+        id: row.get::<Uuid, _>("id").to_string(),
+        rescue_id: row
+            .get::<Option<Uuid>, _>("rescue_id")
+            .map(|value| value.to_string()),
+        post_id: row.get::<Uuid, _>("post_id").to_string(),
+        post_title: row.get("post_title"),
+        post_type: row.get("post_type"),
+        status: row.get("status"),
+        summary: row.get("summary"),
+        public_update: row.get("public_update"),
+        generated_by_ai: row.get("generated_by_ai"),
+        publication_status: row.get("publication_status"),
+        rejection_reason: row.get("rejection_reason"),
+        approved_by: row
+            .get::<Option<Uuid>, _>("approved_by")
+            .map(|value| value.to_string()),
+        approved_at: row.get("approved_at"),
+        rejected_by: row
+            .get::<Option<Uuid>, _>("rejected_by")
+            .map(|value| value.to_string()),
+        rejected_at: row.get("rejected_at"),
+        created_by: row
+            .get::<Option<Uuid>, _>("created_by")
+            .map(|value| value.to_string()),
+        updated_by: row
+            .get::<Option<Uuid>, _>("updated_by")
+            .map(|value| value.to_string()),
+        admin_notes: row.get("admin_notes"),
+        ai_model: row.get("ai_model"),
+        ai_latency_ms: row.get("ai_latency_ms"),
+        ai_cost_cents: row.get("ai_cost_cents"),
+        prompt_version: row.get("prompt_version"),
+        schema_version: row.get("schema_version"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 fn row_to_queue_job(row: sqlx::postgres::PgRow) -> QueueJob {
     let status: String = row.get("status");
     let finished_at = if status == "sent" {
