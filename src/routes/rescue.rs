@@ -540,10 +540,11 @@ pub async fn incident(
     )
     .await?;
 
-    let post_id = sqlx::query_scalar::<_, Uuid>("SELECT post_id FROM rescue_sessions WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
+    let post_id =
+        sqlx::query_scalar::<_, Uuid>("SELECT post_id FROM rescue_sessions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
 
     let post_id = post_id.ok_or(ApiError::NotFound)?;
 
@@ -1200,7 +1201,8 @@ async fn generate_final_report_draft(
     if worker_url.is_empty() {
         return Ok(deterministic_final_report(fallback_status));
     }
-    let ai_context = build_final_report_ai_context(state, rescue_id, post_id, requested_status).await?;
+    let ai_context =
+        build_final_report_ai_context(state, rescue_id, post_id, requested_status).await?;
 
     let started = Instant::now();
     let response = reqwest::Client::new()
