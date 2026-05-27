@@ -1163,6 +1163,32 @@ fn final_report_fallback_text(status: RescueFinalStatus) -> (&'static str, &'sta
     }
 }
 
+#[cfg(test)]
+mod final_report_tests {
+    use super::*;
+
+    #[test]
+    fn parses_final_status_values() {
+        assert_eq!(
+            RescueFinalStatus::from_str("false_alarm"),
+            Some(RescueFinalStatus::FalseAlarm)
+        );
+        assert_eq!(
+            RescueFinalStatus::from_str("rescued"),
+            Some(RescueFinalStatus::Rescued)
+        );
+        assert_eq!(RescueFinalStatus::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn fallback_never_publishes_and_uses_requested_status() {
+        let draft = deterministic_final_report(RescueFinalStatus::Cancelled);
+        assert!(!draft.generated_by_ai);
+        assert_eq!(draft.status, RescueFinalStatus::Cancelled);
+        assert_eq!(draft.public_update, "Atualização: o chamado foi cancelado.");
+    }
+}
+
 fn trim_report_text(value: String, max_chars: usize) -> String {
     let trimmed = value.trim();
     if trimmed.chars().count() <= max_chars {
