@@ -343,7 +343,7 @@ pub fn seed_messages(room_id: &str) -> Vec<ChatMessage> {
         ChatMessage {
             id: format!("{room_id}-m1"),
             sender_id: "u1".into(),
-            body: "Olá, obrigado por chamar pelo ZooHelp.".into(),
+            body: "Olá, obrigado por chamar pelo Helpin.".into(),
             created_at: "14:30".into(),
         },
         ChatMessage {
