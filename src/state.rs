@@ -403,6 +403,21 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS rescue_events (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          rescue_id uuid NOT NULL REFERENCES rescue_sessions(id) ON DELETE CASCADE,
+          post_id uuid NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+          type text NOT NULL,
+          actor_id uuid REFERENCES users(id) ON DELETE SET NULL,
+          message text,
+          metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        "#,
+        "CREATE INDEX IF NOT EXISTS rescue_events_rescue_created_idx ON rescue_events (rescue_id, created_at ASC);",
+        "CREATE INDEX IF NOT EXISTS rescue_events_post_created_idx ON rescue_events (post_id, created_at ASC);",
+        "CREATE INDEX IF NOT EXISTS rescue_events_type_idx ON rescue_events (type);",
+        r#"
         CREATE TABLE IF NOT EXISTS rescue_responses (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
           rescue_session_id uuid REFERENCES rescue_sessions(id) ON DELETE CASCADE,
