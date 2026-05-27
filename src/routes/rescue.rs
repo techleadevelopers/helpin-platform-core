@@ -548,6 +548,7 @@ pub async fn incident(
     let post_id = post_id.ok_or(ApiError::NotFound)?;
 
     let incident_id = Uuid::now_v7();
+    let attachments_count = payload.attachments.len();
     sqlx::query(
         r#"
         INSERT INTO rescue_incidents (id, rescue_id, description, attachments, status)
@@ -568,7 +569,7 @@ pub async fn incident(
         "incident_reported",
         Some(user_id),
         Some("Incidente reportado durante o resgate"),
-        json!({ "incidentId": incident_id, "attachmentsCount": payload.attachments.len() }),
+        json!({ "incidentId": incident_id, "attachmentsCount": attachments_count }),
     )
     .await
     {
@@ -1443,6 +1444,51 @@ fn trim_report_text(value: String, max_chars: usize) -> String {
         return trimmed.to_string();
     }
     trimmed.chars().take(max_chars).collect()
+}
+
+fn redact_sensitive_text(value: String) -> String {
+    value
+        .split_whitespace()
+        .map(|token| {
+            let digits = token.chars().filter(|char| char.is_ascii_digit()).count();
+            if token.contains('@') && token.contains('.') {
+                "[email]".to_string()
+            } else if digits >= 8 {
+                "[telefone]".to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+async fn insert_rescue_event(
+    state: &AppState,
+    rescue_id: Uuid,
+    post_id: Uuid,
+    event_type: &str,
+    actor_id: Option<Uuid>,
+    message: Option<&str>,
+    metadata: serde_json::Value,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        INSERT INTO rescue_events (id, rescue_id, post_id, type, actor_id, message, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(rescue_id)
+    .bind(post_id)
+    .bind(event_type)
+    .bind(actor_id)
+    .bind(message)
+    .bind(metadata)
+    .execute(&state.db)
+    .await?;
+
+    Ok(())
 }
 
 fn optional_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
