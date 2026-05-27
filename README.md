@@ -411,11 +411,18 @@ Recommended durability split:
 |-------|-----------------|
 | PostgreSQL | authoritative relational state and latitude/longitude storage |
 | Redis | low-latency geospatial lookup, cache, rate limits |
-| NATS/Kafka | durable rescue alert and moderation events |
+| NATS/Kafka | durable rescue alert and moderation events target |
 | Rust workers | notification fan-out, realtime coordination, trust/fraud core |
 | Python workers | AI moderation, NLP, analytics, model experiments |
 | Cloudinary/S3/R2 | media storage and delivery |
 | FCM/APNs | push notification delivery |
+
+Current queue reality:
+
+- critical rescue notification state is persisted in PostgreSQL through `notification_events`, `push_delivery_jobs`, `rescue_fanout_states`, `rescue_fanout_attempts`, `rescue_responses`, `rescue_specialist_providers`, and `rescue_escalation_attempts`
+- workers claim due jobs with row locking and persist retry/dead-letter state
+- NATS is present for cross-process realtime fanout, but the current implementation uses plain pub/sub, not JetStream/Kafka-style durable replay
+- WebSocket broadcast channels are in-memory delivery surfaces only; the authoritative chat and rescue history remains in PostgreSQL
 
 ## Security and Trust Model
 
@@ -425,6 +432,7 @@ Security and integrity controls:
 
 - JWT-based auth surface
 - password hashing service
+- refresh tokens persisted in PostgreSQL with revocation timestamps
 - account deletion endpoint
 - report endpoint for content moderation
 - trust scoring service
@@ -437,14 +445,14 @@ Security and integrity controls:
 
 Production hardening still required:
 
-- durable session and refresh-token persistence
+- access-token revocation before expiry through a session table, `jti` denylist, or user token-version check
 - role-based authorization beyond contract shape
 - full audit log
 - rate limits enforced at edge and API levels
 - durable report/moderation workflow
 - FCM/APNs delivery receipts
-- Redis/NATS-backed notification state
-- database persistence replacing seeded in-memory data where still present
+- durable NATS JetStream/Kafka consumers for replayable realtime/domain events
+- API restart and worker restart evidence proving no critical rescue/chat state is lost
 
 ## Reliability Controls
 
@@ -492,6 +500,13 @@ PUSH_WORKER_ENABLED
 RESCUE_FANOUT_WORKER_ENABLED
 POSTGIS_ENABLED
 ```
+
+Production guardrails:
+
+- outside development, `JWT_SECRET` must be a real non-placeholder secret with at least 32 characters
+- outside development, `ACCESS_TOKEN_TTL_MINUTES` must be between `1` and `60`
+- outside development, `PUSH_WORKER_ENABLED=true` and `RESCUE_FANOUT_WORKER_ENABLED=true` are required
+- `NATS_URL` is required outside development, but NATS currently supports realtime fanout only; durable queue semantics still come from PostgreSQL job tables until JetStream/Kafka is implemented
 
 Cloudinary media:
 
@@ -615,13 +630,14 @@ Strong current surfaces:
 
 Known hardening gaps before real public scale:
 
-- replace remaining seeded data paths with PostgreSQL persistence
-- move notification engine state to Redis/PostgreSQL/NATS
+- remove any remaining public seed/mock fallback paths and prove critical endpoints are PostgreSQL-backed
+- move realtime/domain event delivery from plain NATS pub/sub to durable JetStream/Kafka consumers where replay is required
+- add immediate access-token invalidation for banned, deleted, or compromised accounts
 - deliver push notifications through FCM/APNs workers
 - enforce production rate limits and abuse controls
 - complete durable moderation and report review flows
 - publish measured benchmark reports for PostgreSQL, Redis, queue, upload, WebSocket, and push delivery paths
-- add migration-backed user/session/post/chat persistence where still mocked
+- run and document API restart plus worker restart tests for chat, rescue sessions, push jobs, and `Estou indo`
 - add production observability dashboards and alerting
 
 ## Production Intent
@@ -642,4 +658,3 @@ The strategic direction is narrow and operational:
 The operating thesis is:
 
 `simple mobile action -> reliable backend coordination -> nearby human response -> measurable animal impact`
-
