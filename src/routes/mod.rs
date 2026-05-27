@@ -185,6 +185,19 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/rescue/active/:id/incident", post(rescue::incident))
         .route("/v1/rescue/active/:id/responses", post(rescue::respond))
         .route("/v1/rescue/active/:id/ws", get(rescue::rescue_ws))
+        .route(
+            "/v1/rescue/:id/final-report/generate",
+            post(rescue::generate_final_report),
+        )
+        .route("/v1/rescue/:id/final-report", get(rescue::get_final_report))
+        .route(
+            "/v1/rescue/:id/final-report/approve",
+            post(rescue::approve_final_report),
+        )
+        .route(
+            "/v1/rescue/:id/final-report/reject",
+            post(rescue::reject_final_report),
+        )
         .route("/v1/support/meta", get(support::meta))
         .route(
             "/v1/support/tickets",
@@ -392,7 +405,7 @@ mod tests {
                     "name": "Mel",
                     "postType": "adoption",
                     "animalType": "dog",
-                    "description": "Animal vacinado para adocao responsavel.",
+                    "description": "Animal vacinado para adoção responsavel.",
                     "location": "Sao Paulo, SP",
                     "neighborhood": "Vila Mariana",
                     "images": [{
@@ -433,7 +446,7 @@ mod tests {
                     "postType": "emergency",
                     "animalType": "other",
                     "description": "Animal ferido precisa de ajuda agora.",
-                    "location": "Localizacao atual",
+                    "location": "Localização atual",
                     "urgent": true
                 })
                 .to_string(),
@@ -459,8 +472,8 @@ mod tests {
                     "postType": "emergency",
                     "animalType": "other",
                     "description": "Animal ferido precisa de ajuda agora.",
-                    "location": "Localizacao atual",
-                    "neighborhood": "Localizacao atual",
+                    "location": "Localização atual",
+                    "neighborhood": "Localização atual",
                     "urgent": true,
                     "latitude": -23.5505,
                     "longitude": -46.6333
