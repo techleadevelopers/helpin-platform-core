@@ -458,7 +458,9 @@ pub async fn me(
         None
     };
 
-    Ok(Json(current_user_response(&state, record, ong_record).await))
+    Ok(Json(
+        current_user_response(&state, record, ong_record).await,
+    ))
 }
 
 pub async fn delete_account(
@@ -579,7 +581,9 @@ pub async fn update_profile(
     let neighborhood = normalize_optional(payload.neighborhood.as_deref());
     let city = normalize_optional(payload.city.as_deref());
     if city.is_some() ^ state_code.is_some() {
-        return Err(ApiError::Validation("city and state must be sent together".into()));
+        return Err(ApiError::Validation(
+            "city and state must be sent together".into(),
+        ));
     }
 
     let mut tx = state.db.begin().await?;
@@ -638,7 +642,9 @@ pub async fn update_profile(
         None
     };
 
-    Ok(Json(current_user_response(&state, record, ong_record).await))
+    Ok(Json(
+        current_user_response(&state, record, ong_record).await,
+    ))
 }
 
 #[derive(Debug)]
@@ -1229,7 +1235,9 @@ async fn validate_owned_avatar_url(
     if !(avatar_url.contains("/zoohelp/profile-avatars/image/")
         || avatar_url.contains("/zoohelp/ong-logos/image/"))
     {
-        return Err(ApiError::Validation("avatarUrl purpose is not allowed".into()));
+        return Err(ApiError::Validation(
+            "avatarUrl purpose is not allowed".into(),
+        ));
     }
 
     let owned: bool = sqlx::query_scalar(
