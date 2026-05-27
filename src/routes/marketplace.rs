@@ -11,7 +11,7 @@ pub struct MarketplaceItem {
 pub async fn list_items() -> Json<Vec<MarketplaceItem>> {
     Json(vec![MarketplaceItem {
         id: "market-dev",
-        title: "Racao para doacao",
+        title: "Ração para doação",
         item_type: "donation",
     }])
 }
