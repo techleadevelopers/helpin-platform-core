@@ -225,6 +225,8 @@ mod tests {
         http::{Method, Request, StatusCode},
     };
     use serde_json::{json, Value};
+    use std::{env, sync::OnceLock};
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     use super::*;
@@ -232,13 +234,29 @@ mod tests {
         config::Config, domain::AccountType, services::auth as auth_service, state::AppState,
     };
 
+    const TEST_USER_ID: &str = "018f0000-0000-7000-8000-000000000001";
+    const TEST_ONG_ID: &str = "018f0000-0000-7000-8000-000000000101";
+    const TEST_FEED_POST_ID: &str = "018f0000-0000-7000-8000-000000000201";
+    const TEST_MEDIA_INTENT_ID: &str = "018f0000-0000-7000-8000-000000000301";
+    const TEST_MEDIA_OBJECT_KEY: &str = "posts/test/mel.webp";
+    const TEST_MEDIA_PUBLIC_URL: &str = "https://cdn.zoohelp.local/posts/test/mel.webp";
+
     fn test_config() -> Config {
+        dotenvy::dotenv().ok();
+
         Config {
             app_env: "test".into(),
             bind_addr: "127.0.0.1:0".into(),
-            database_url: "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into(),
-            database_max_connections: 5,
-            database_min_connections: 0,
+            database_url: env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into()),
+            database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(5),
+            database_min_connections: env::var("DATABASE_MIN_CONNECTIONS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
             redis_url: "redis://localhost:6379".into(),
             nats_url: "nats://localhost:4222".into(),
             ai_worker_url: "http://127.0.0.1:8090".into(),
@@ -278,7 +296,7 @@ mod tests {
     fn test_auth_header(account_type: AccountType) -> String {
         let token = auth_service::issue_access_token(
             &test_config(),
-            "018f0000-0000-7000-8000-000000000001",
+            TEST_USER_ID,
             "admin@zoohelp.test",
             account_type,
         )
@@ -287,9 +305,123 @@ mod tests {
     }
 
     async fn test_app() -> Router {
+        static STATE_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = STATE_INIT_LOCK.get_or_init(|| Mutex::new(())).lock().await;
         let config = test_config();
         let state = AppState::new(config).await.expect("test state");
+        seed_test_fixtures(&state).await.expect("test fixtures");
         router(state)
+    }
+
+    async fn seed_test_fixtures(state: &AppState) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO users (
+              id, name, email, avatar_url, password_hash, account_type, verified,
+              trust_score, gender, cep, street, number, complement, neighborhood, city, state
+            )
+            VALUES (
+              $1, 'Instituto Teste ZooHelp', 'admin@zoohelp.test', NULL, 'test-hash',
+              'ong', true, 80, NULL, '01001000', 'Rua Teste', '100', NULL,
+              'Vila Mariana', 'Sao Paulo', 'SP'
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              name = EXCLUDED.name,
+              email = EXCLUDED.email,
+              account_type = EXCLUDED.account_type,
+              verified = EXCLUDED.verified,
+              deleted_at = NULL
+            "#,
+        )
+        .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
+        .execute(&state.db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO ong_profiles (
+              id, user_id, legal_name, cnpj, mission, city, state, area_type,
+              contact_phone, cep, street, number, complement, neighborhood,
+              foundation_year, verification_status
+            )
+            VALUES (
+              $1, $2, 'Instituto Teste ZooHelp', '12345678000191',
+              'Resgate e protecao animal.', 'Sao Paulo', 'SP', 'rescue',
+              '(11) 99999-0001', '01001000', 'Rua Teste', '100', NULL,
+              'Vila Mariana', 2016, 'APPROVED'
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              user_id = EXCLUDED.user_id,
+              legal_name = EXCLUDED.legal_name,
+              verification_status = EXCLUDED.verification_status,
+              contact_phone = EXCLUDED.contact_phone
+            "#,
+        )
+        .bind(uuid::Uuid::parse_str(TEST_ONG_ID)?)
+        .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
+        .execute(&state.db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO posts (
+              id, author_id, post_type, animal_type, name, breed, age, title,
+              description, latitude, longitude, location_label, neighborhood, contact,
+              tags, urgent, rescue_status, text_only, likes_count, comments_count,
+              shares_count, moderation_status, fraud_risk, geo_status, geo_source,
+              geo_provider, geo_confidence, geo_resolved_at, route_public
+            )
+            VALUES (
+              $1, $2, 'emergency', 'cat', 'Sem nome', 'Gatinho tigrado',
+              'Estimado 3 meses', NULL,
+              'Gatinho encontrado ferido na Av. Paulista.',
+              -23.5614, -46.6559, 'Sao Paulo, SP', 'Bela Vista',
+              '(11) 99999-0002', ARRAY['emergencia', 'ferido'], true, 'active',
+              false, 340, 67, 210, 'approved', 0, 'confirmed',
+              'gps_confirmed', 'test', 1.0, now(), true
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              author_id = EXCLUDED.author_id,
+              post_type = EXCLUDED.post_type,
+              animal_type = EXCLUDED.animal_type,
+              moderation_status = EXCLUDED.moderation_status,
+              urgent = EXCLUDED.urgent,
+              rescue_status = EXCLUDED.rescue_status,
+              route_public = EXCLUDED.route_public,
+              geo_status = EXCLUDED.geo_status
+            "#,
+        )
+        .bind(uuid::Uuid::parse_str(TEST_FEED_POST_ID)?)
+        .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
+        .execute(&state.db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO media_upload_intents (
+              id, user_id, provider, resource_type, object_key, file_name, content_type,
+              size_bytes, checksum_sha256, upload_url, public_url, expires_at, consumed_at
+            )
+            VALUES (
+              $1, $2, 'cloudinary', 'image', $3, 'mel.webp', 'image/webp',
+              320000, NULL, 'https://api.cloudinary.com/v1_1/limpeja/image/upload',
+              $4, now() + interval '15 minutes', NULL
+            )
+            ON CONFLICT (object_key) DO UPDATE SET
+              user_id = EXCLUDED.user_id,
+              public_url = EXCLUDED.public_url,
+              expires_at = EXCLUDED.expires_at,
+              consumed_at = NULL
+            "#,
+        )
+        .bind(uuid::Uuid::parse_str(TEST_MEDIA_INTENT_ID)?)
+        .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
+        .bind(TEST_MEDIA_OBJECT_KEY)
+        .bind(TEST_MEDIA_PUBLIC_URL)
+        .execute(&state.db)
+        .await?;
+
+        Ok(())
     }
 
     async fn request_json(app: Router, request: Request<Body>) -> (StatusCode, Value) {
@@ -308,6 +440,7 @@ mod tests {
         let request = Request::builder()
             .method(Method::GET)
             .uri("/v1/maps/static-url?lat=-23.5505&lng=-46.6333&zoom=14")
+            .header("authorization", test_auth_header(AccountType::Ong))
             .body(Body::empty())
             .unwrap();
 
@@ -344,6 +477,7 @@ mod tests {
     #[tokio::test]
     async fn auth_register_returns_frontend_user_shape() {
         let app = test_app().await;
+        let email = format!("ong-{}@zoohelp.test", uuid::Uuid::now_v7());
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/auth/register")
@@ -351,12 +485,14 @@ mod tests {
             .body(Body::from(
                 json!({
                     "name": "ONG Teste",
-                    "email": "ong@zoohelp.com",
+                    "email": email,
                     "password": "senha-segura",
                     "accountType": "ong",
                     "ongType": "rescue",
-                    "cnpj": "12.345.678/0001-90",
                     "phone": "(11) 99999-0001",
+                    "cep": "01001000",
+                    "street": "Rua Teste",
+                    "number": "100",
                     "city": "Sao Paulo",
                     "state": "SP"
                 })
@@ -506,6 +642,7 @@ mod tests {
             .method(Method::POST)
             .uri("/v1/media/upload-intents")
             .header("content-type", "application/json")
+            .header("authorization", test_auth_header(AccountType::Ong))
             .body(Body::from(
                 json!({
                     "fileName": "resgate.webp",
@@ -539,14 +676,14 @@ mod tests {
         let app = test_app().await;
         let request = Request::builder()
             .method(Method::GET)
-            .uri("/v1/ongs/o1")
+            .uri(format!("/v1/ongs/{TEST_ONG_ID}"))
             .body(Body::empty())
             .unwrap();
 
         let (status, body) = request_json(app, request).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["id"], "o1");
+        assert_eq!(body["id"], TEST_ONG_ID);
         assert_eq!(body["verified"], true);
         assert!(body["animalsRescued"].as_u64().unwrap() > 0);
     }
