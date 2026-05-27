@@ -191,7 +191,7 @@ fn row_to_ong(row: sqlx::postgres::PgRow) -> Ong {
         city: city_label,
         state: state_label,
         verified: verification_status == "APPROVED",
-        animals_rescued: 0,
+        animals_rescued: row.get::<i32, _>("active_cases").max(0) as u32,
         active_cases: row.get::<i32, _>("active_cases").max(0) as u32,
         adoptions: 0,
         animal_types: vec!["Todos".into()],
