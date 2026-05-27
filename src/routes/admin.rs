@@ -649,7 +649,8 @@ pub async fn queue_status(
     authenticate_admin(&state, &headers)?;
 
     let waiting = count_push_jobs(&state, "queued").await?;
-    let failed = count_push_jobs(&state, "failed").await? + count_push_jobs(&state, "dead_letter").await?;
+    let failed =
+        count_push_jobs(&state, "failed").await? + count_push_jobs(&state, "dead_letter").await?;
     let completed = count_push_jobs(&state, "sent").await?;
     let delayed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM push_delivery_jobs WHERE status IN ('queued', 'failed') AND next_attempt_at > now()",
