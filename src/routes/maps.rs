@@ -120,10 +120,35 @@ pub async fn static_map_url(
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
     authorize_maps_request(&state, &headers, "static").await?;
+    let provider = state
+        .config
+        .geocoding_api_provider
+        .as_deref()
+        .unwrap_or("google")
+        .trim()
+        .to_ascii_lowercase();
+    if provider != "google" && provider != "google_maps" {
+        return Ok(Json(StaticMapResponse {
+            provider,
+            image_url: None,
+        }));
+    }
 
+    let api_key = google_maps_key(&state)?;
+    let zoom = query.zoom.unwrap_or(14);
+    let width = query.width.unwrap_or(640);
+    let height = query.height.unwrap_or(360);
+    let image_url = format!(
+        "https://maps.googleapis.com/maps/api/staticmap?center={},{}&zoom={zoom}&size={width}x{height}&markers=color:red%7C{},{}&key={}",
+        query.lat,
+        query.lng,
+        query.lat,
+        query.lng,
+        url_component(api_key),
+    );
     Ok(Json(StaticMapResponse {
         provider: "google".to_string(),
-        image_url: None,
+        image_url: Some(image_url),
     }))
 }
 
