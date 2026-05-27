@@ -186,7 +186,7 @@ fn row_to_ong(row: sqlx::postgres::PgRow) -> Ong {
             .unwrap_or_else(|| "ONG verificada na rede ZooHelp.".into()),
         mission: row
             .get::<Option<String>, _>("mission")
-            .unwrap_or_else(|| "Protecao animal e apoio a comunidade.".into()),
+            .unwrap_or_else(|| "Proteção animal e apoio a comunidade.".into()),
         location,
         city: city_label,
         state: state_label,
@@ -203,7 +203,7 @@ fn row_to_ong(row: sqlx::postgres::PgRow) -> Ong {
             .unwrap_or_default(),
         cause: row
             .get::<Option<String>, _>("area_type")
-            .unwrap_or_else(|| "Protecao animal".into()),
+            .unwrap_or_else(|| "Proteção animal".into()),
     }
 }
 
