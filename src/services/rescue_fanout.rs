@@ -291,7 +291,7 @@ pub async fn operational_summary(
     } else if phase.is_some() {
         "Precisa de ajuda".to_string()
     } else {
-        "Resgate em coordenacao".to_string()
+        "Resgate em coordenação".to_string()
     };
 
     Ok(RescueOperationalSummary {
@@ -778,7 +778,7 @@ async fn load_post_for_fanout(
           p.id::text AS id,
           p.post_type::text AS post_type,
           p.animal_type,
-          COALESCE(p.name, 'Publicacao') AS name,
+          COALESCE(p.name, 'Publicação') AS name,
           COALESCE(p.breed, '') AS breed,
           COALESCE(p.age, '') AS age,
           p.description,
@@ -865,13 +865,14 @@ async fn load_post_for_fanout(
         geo_source: row.get("geo_source"),
         route_public: row.get("route_public"),
         rescue_operational: None,
+        rescue_final_report: None,
     })
 }
 
 fn confirmed_coords(post: &Post) -> Result<(f64, f64), sqlx::Error> {
-    post.latitude.zip(post.longitude).ok_or_else(|| {
-        sqlx::Error::Protocol("fanout requires confirmed post coordinates".into())
-    })
+    post.latitude
+        .zip(post.longitude)
+        .ok_or_else(|| sqlx::Error::Protocol("fanout requires confirmed post coordinates".into()))
 }
 
 async fn ranked_candidates(
