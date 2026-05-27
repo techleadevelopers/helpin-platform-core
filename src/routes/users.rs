@@ -76,12 +76,11 @@ pub async fn follow_user(
         return Err(ApiError::Validation("cannot follow yourself".into()));
     }
 
-    let exists: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(followed_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(followed_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound);
     }
