@@ -616,7 +616,8 @@ mod tests {
                     "neighborhood": "Localização atual",
                     "urgent": true,
                     "latitude": -23.5505,
-                    "longitude": -46.6333
+                    "longitude": -46.6333,
+                    "geoSource": "gps_confirmed"
                 })
                 .to_string(),
             ))
