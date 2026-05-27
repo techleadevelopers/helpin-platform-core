@@ -135,18 +135,6 @@ impl RescueFinalStatus {
             Self::FalseAlarm => "false_alarm",
         }
     }
-
-    fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "rescued" => Some(Self::Rescued),
-            "not_found" => Some(Self::NotFound),
-            "died" => Some(Self::Died),
-            "referred" => Some(Self::Referred),
-            "cancelled" => Some(Self::Cancelled),
-            "false_alarm" => Some(Self::FalseAlarm),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Serialize)]
@@ -1419,16 +1407,9 @@ mod final_report_tests {
     use super::*;
 
     #[test]
-    fn parses_final_status_values() {
-        assert_eq!(
-            RescueFinalStatus::from_str("false_alarm"),
-            Some(RescueFinalStatus::FalseAlarm)
-        );
-        assert_eq!(
-            RescueFinalStatus::from_str("rescued"),
-            Some(RescueFinalStatus::Rescued)
-        );
-        assert_eq!(RescueFinalStatus::from_str("unknown"), None);
+    fn serializes_final_status_values() {
+        assert_eq!(RescueFinalStatus::FalseAlarm.as_str(), "false_alarm");
+        assert_eq!(RescueFinalStatus::Rescued.as_str(), "rescued");
     }
 
     #[test]
