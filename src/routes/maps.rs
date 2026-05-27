@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    error::ApiError,
-    routes::auth::authenticate_request,
-    services::rate_limit,
-    state::AppState,
+    error::ApiError, routes::auth::authenticate_request, services::rate_limit, state::AppState,
 };
 
 #[derive(Debug, Deserialize, Validate)]
