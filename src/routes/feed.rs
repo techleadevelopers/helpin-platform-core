@@ -79,9 +79,9 @@ fn rank_feed(query: FeedQuery, db_posts: Vec<Post>) -> Vec<Post> {
         .filter(|post| query.urgent.map_or(true, |urgent| post.urgent == urgent))
         .filter_map(|post| {
             let distance = origin.and_then(|(lat, lng)| {
-                post.latitude.zip(post.longitude).map(|(post_lat, post_lng)| {
-                    haversine_km(lat, lng, post_lat, post_lng)
-                })
+                post.latitude
+                    .zip(post.longitude)
+                    .map(|(post_lat, post_lng)| haversine_km(lat, lng, post_lat, post_lng))
             });
             if distance.map_or(false, |value| value > radius) {
                 return None;
@@ -116,7 +116,7 @@ pub(crate) async fn load_db_posts(
             p.id::text AS id,
             p.post_type::text AS post_type,
             p.animal_type,
-            COALESCE(p.name, 'Publicacao') AS name,
+            COALESCE(p.name, 'Publicação') AS name,
             COALESCE(p.breed, '') AS breed,
             COALESCE(p.age, '') AS age,
             p.description,
@@ -204,7 +204,7 @@ pub(crate) async fn load_db_posts(
             p.id::text AS id,
             p.post_type::text AS post_type,
             p.animal_type,
-            COALESCE(p.name, 'Publicacao') AS name,
+            COALESCE(p.name, 'Publicação') AS name,
             COALESCE(p.breed, '') AS breed,
             COALESCE(p.age, '') AS age,
             p.description,
@@ -354,9 +354,19 @@ pub(crate) async fn load_db_posts(
                 geo_source: row.get("geo_source"),
                 route_public: row.get("route_public"),
                 rescue_operational: rescue_operational_from_row(&row),
+                rescue_final_report: None,
             }
         })
         .collect();
+
+    let post_ids: Vec<Uuid> = posts
+        .iter()
+        .filter_map(|post| Uuid::parse_str(&post.id).ok())
+        .collect();
+    let reports = super::rescue::load_published_final_reports_for_posts(state, &post_ids).await?;
+    for post in &mut posts {
+        post.rescue_final_report = reports.get(&post.id).cloned();
+    }
 
     let post_ids: Vec<Uuid> = posts
         .iter()
