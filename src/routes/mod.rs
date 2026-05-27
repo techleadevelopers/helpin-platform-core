@@ -6,24 +6,43 @@ use axum::{
 use crate::state::AppState;
 
 mod admin;
+#[path = "operations/ai.rs"]
 mod ai;
+#[path = "identity/auth.rs"]
 mod auth;
+#[path = "operations/chat.rs"]
 mod chat;
+#[path = "commerce/donations.rs"]
 mod donations;
+#[path = "content/feed.rs"]
 mod feed;
+#[path = "geo/nearby.rs"]
 mod geo;
+#[path = "platform/health.rs"]
 mod health;
+#[path = "geo/maps.rs"]
 pub(crate) mod maps;
+#[path = "content/marketplace.rs"]
 mod marketplace;
+#[path = "content/media.rs"]
 mod media;
+#[path = "operations/notifications.rs"]
 mod notifications;
+#[path = "platform/observability.rs"]
 mod observability;
+#[path = "operations/ongs.rs"]
 mod ongs;
+#[path = "content/posts.rs"]
 mod posts;
+#[path = "operations/rescue.rs"]
 mod rescue;
+#[path = "content/search.rs"]
 mod search;
+#[path = "platform/support.rs"]
 mod support;
+#[path = "identity/trust.rs"]
 mod trust;
+#[path = "identity/users.rs"]
 mod users;
 
 pub fn router(state: AppState) -> Router {
@@ -189,6 +208,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/rescue/active/:id/incident", post(rescue::incident))
         .route("/v1/rescue/active/:id/responses", post(rescue::respond))
         .route("/v1/rescue/active/:id/ws", get(rescue::rescue_ws))
+        .route("/v1/rescue/:id/brief", post(ai::rescue_brief))
         .route(
             "/v1/rescue/:id/final-report/generate",
             post(rescue::generate_final_report),
@@ -214,6 +234,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/search", get(search::search))
         .route("/v1/marketplace/items", get(marketplace::list_items))
+        .route("/v1/ai/post-assessment", post(ai::assess_post))
         .route("/v1/ai/moderation-jobs", post(ai::enqueue_moderation_job))
         .with_state(state)
 }
@@ -238,6 +259,7 @@ mod tests {
     const TEST_ONG_ID: &str = "018f0000-0000-7000-8000-000000000101";
     const TEST_FEED_POST_ID: &str = "018f0000-0000-7000-8000-000000000201";
     const TEST_MEDIA_INTENT_ID: &str = "018f0000-0000-7000-8000-000000000301";
+    const TEST_RESCUE_ID: &str = "018f0000-0000-7000-8000-000000000401";
     const TEST_MEDIA_OBJECT_KEY: &str = "posts/test/mel.webp";
     const TEST_MEDIA_PUBLIC_URL: &str = "https://cdn.zoohelp.local/posts/test/mel.webp";
 
@@ -391,6 +413,28 @@ mod tests {
               geo_status = EXCLUDED.geo_status
             "#,
         )
+        .bind(uuid::Uuid::parse_str(TEST_FEED_POST_ID)?)
+        .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
+        .execute(&state.db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO rescue_sessions (
+              id, post_id, reporter_user_id, status, lat, lng, accuracy
+            )
+            VALUES ($1, $2, $3, 'active', -23.5614, -46.6559, 15.0)
+            ON CONFLICT (id) DO UPDATE SET
+              post_id = EXCLUDED.post_id,
+              reporter_user_id = EXCLUDED.reporter_user_id,
+              status = EXCLUDED.status,
+              lat = EXCLUDED.lat,
+              lng = EXCLUDED.lng,
+              accuracy = EXCLUDED.accuracy,
+              updated_at = now()
+            "#,
+        )
+        .bind(uuid::Uuid::parse_str(TEST_RESCUE_ID)?)
         .bind(uuid::Uuid::parse_str(TEST_FEED_POST_ID)?)
         .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
         .execute(&state.db)
@@ -670,6 +714,54 @@ mod tests {
         assert_eq!(body["cloudinary"]["apiKey"], "test-api-key");
         assert!(body["cloudinary"]["signature"].as_str().unwrap().len() >= 40);
         assert_eq!(body["maxSizeBytes"], 10 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn post_assessment_proxies_worker_contract_with_fallback() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/ai/post-assessment")
+            .header("content-type", "application/json")
+            .header("authorization", test_auth_header(AccountType::Ong))
+            .body(Body::from(
+                json!({
+                    "description": "Cachorro atropelado precisa de ajuda urgente.",
+                    "location": "Sao Paulo, SP",
+                    "declaredType": "emergency",
+                    "images": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (status, body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["suggestedType"], "emergency");
+        assert_eq!(body["urgency"], "high");
+        assert_eq!(body["promptVersion"], "post-assessment-v1");
+    }
+
+    #[tokio::test]
+    async fn rescue_brief_proxies_worker_contract_with_fallback() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/rescue/{TEST_RESCUE_ID}/brief"))
+            .header("authorization", test_auth_header(AccountType::Ong))
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("Resgate em acompanhamento"));
+        assert_eq!(body["promptVersion"], "rescue-brief-v1");
+        assert!(body["checklist"].as_array().is_some());
     }
 
     #[tokio::test]
