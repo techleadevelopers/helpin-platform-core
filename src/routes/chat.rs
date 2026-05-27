@@ -330,19 +330,31 @@ pub async fn send_message(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| ApiError::Validation("idempotency-key is required for chat messages".into()))?;
+        .ok_or_else(|| {
+            ApiError::Validation("idempotency-key is required for chat messages".into())
+        })?;
     if idempotency_key.len() > 160 {
         return Err(ApiError::Validation("idempotency-key is too long".into()));
     }
 
-    let (message, inserted) =
-        persist_chat_message(&state, room_id, sender_id, payload.body, Some(&idempotency_key)).await?;
+    let (message, inserted) = persist_chat_message(
+        &state,
+        room_id,
+        sender_id,
+        payload.body,
+        Some(&idempotency_key),
+    )
+    .await?;
     if inserted {
         broadcast_chat_message(&state, &room_id.to_string(), &message).await;
     }
 
     Ok((
-        if inserted { StatusCode::CREATED } else { StatusCode::OK },
+        if inserted {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
         Json(SendMessageResponse { message }),
     ))
 }
@@ -359,14 +371,13 @@ pub async fn mark_read(
     let through_message_id = parse_uuid(&payload.through_message_id)?;
     ensure_room_member(&state, room_id, user_id).await?;
 
-    let read_at: DateTime<Utc> = sqlx::query_scalar(
-        "SELECT created_at FROM chat_messages WHERE id = $1 AND room_id = $2",
-    )
-    .bind(through_message_id)
-    .bind(room_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(ApiError::NotFound)?;
+    let read_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT created_at FROM chat_messages WHERE id = $1 AND room_id = $2")
+            .bind(through_message_id)
+            .bind(room_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(ApiError::NotFound)?;
 
     mark_room_read(&state, room_id, user_id, read_at).await?;
     Ok(Json(ChatActionResponse { status: "read" }))
@@ -777,7 +788,9 @@ pub async fn unblock_participant(
         .bind(blocked_id)
         .execute(&state.db)
         .await?;
-    Ok(Json(ChatActionResponse { status: "unblocked" }))
+    Ok(Json(ChatActionResponse {
+        status: "unblocked",
+    }))
 }
 
 fn hash_ticket(ticket: &str) -> String {
