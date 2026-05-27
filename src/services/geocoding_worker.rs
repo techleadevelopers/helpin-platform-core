@@ -51,7 +51,9 @@ async fn process_due_jobs(state: &AppState) -> Result<(), sqlx::Error> {
         .await?;
 
         match maps::geocode_address(state, &address_label).await {
-            Ok(Some(result)) => resolve_post(state, post_id, result.latitude, result.longitude).await?,
+            Ok(Some(result)) => {
+                resolve_post(state, post_id, result.latitude, result.longitude).await?
+            }
             Ok(None) => fail_or_retry(state, post_id, attempts + 1, "address not found").await?,
             Err(error) => fail_or_retry(state, post_id, attempts + 1, &error.to_string()).await?,
         }
@@ -100,10 +102,12 @@ async fn resolve_post(
     .await?;
 
     if operational {
-        sqlx::query("UPDATE posts SET rescue_status = 'active' WHERE id = $1 AND rescue_status = 'open'")
-            .bind(post_id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(
+            "UPDATE posts SET rescue_status = 'active' WHERE id = $1 AND rescue_status = 'open'",
+        )
+        .bind(post_id)
+        .execute(&state.db)
+        .await?;
         rescue_fanout::create_fanout_state_for_post(&state.db, post_id, None).await?;
     }
     Ok(())
