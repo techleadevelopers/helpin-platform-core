@@ -74,9 +74,9 @@ impl EmailService {
         self.send(OutboundEmail {
             to_email: to_email.to_string(),
             to_name: None,
-            subject: "Recuperacao de senha ZooHelp".to_string(),
+            subject: "Recuperação de senha ZooHelp".to_string(),
             text_body: format!(
-                "Recebemos uma solicitacao para recuperar sua senha no ZooHelp.\n\nUse este link para continuar:\n{reset_url}\n\nSe voce nao pediu isso, ignore esta mensagem."
+                "Recebemos uma solicitação para recuperar sua senha no ZooHelp.\n\nUse este link para continuar:\n{reset_url}\n\nSe voce nao pediu isso, ignore esta mensagem."
             ),
         })
         .await
