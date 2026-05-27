@@ -100,7 +100,7 @@ impl Config {
                 .ok()
                 .or_else(|| env::var("SMTP_USER").ok())
                 .unwrap_or_else(|| "no-reply@zoohelp.app".to_string()),
-            smtp_from_name: env::var("SMTP_FROM_NAME").unwrap_or_else(|_| "ZooHelp".to_string()),
+            smtp_from_name: env::var("SMTP_FROM_NAME").unwrap_or_else(|_| "Helpin".to_string()),
             access_token_ttl_minutes: env::var("ACCESS_TOKEN_TTL_MINUTES")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -171,8 +171,14 @@ impl Config {
 
         anyhow::ensure!(
             self.jwt_secret != "dev-only-change-me-before-production"
+                && self.jwt_secret != "change-this-64-byte-secret-before-production"
+                && self.jwt_secret != "replace-with-random-64-byte-production-secret"
                 && self.jwt_secret.len() >= 32,
             "JWT_SECRET must be strong outside development"
+        );
+        anyhow::ensure!(
+            (1..=60).contains(&self.access_token_ttl_minutes),
+            "ACCESS_TOKEN_TTL_MINUTES must be between 1 and 60 outside development"
         );
         anyhow::ensure!(
             self.cloudinary_api_key.is_some() && self.cloudinary_api_secret.is_some(),
@@ -189,6 +195,14 @@ impl Config {
         anyhow::ensure!(
             !self.nats_url.trim().is_empty(),
             "NATS_URL is required outside development"
+        );
+        anyhow::ensure!(
+            self.push_worker_enabled,
+            "PUSH_WORKER_ENABLED=true is required outside development"
+        );
+        anyhow::ensure!(
+            self.rescue_fanout_worker_enabled,
+            "RESCUE_FANOUT_WORKER_ENABLED=true is required outside development"
         );
         if self.payments_enabled {
             anyhow::ensure!(
