@@ -46,7 +46,7 @@ class ZooHelpReadPathUser(HttpUser):
 
     @task(4)
     def search_city_or_rescue(self):
-        query = random.choice(["Campinas", "resgate", "adocao", "cachorro", "gato"])
+        query = random.choice(["Campinas", "resgate", "adoção", "cachorro", "gato"])
         self.client.get("/v1/search", params={"q": query, "limit": 20}, name="/v1/search")
 
     @task(2)
