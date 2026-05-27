@@ -16,7 +16,7 @@ mod tests {
     #[test]
     fn returns_zero_for_neutral_text() {
         assert_eq!(
-            score_post_text("Animal vacinado para adocao responsavel"),
+            score_post_text("Animal vacinado para adoção responsavel"),
             0
         );
     }
