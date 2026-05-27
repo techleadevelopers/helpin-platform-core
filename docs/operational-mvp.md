@@ -95,7 +95,7 @@ Public labels should keep urgency alive:
 | one confirmed helper | `1 pessoa a caminho` |
 | multiple confirmed helpers | `{n} pessoas a caminho` |
 | someone arrived | `Ajuda no local` |
-| fallback active coordination | `Resgate em coordenacao` |
+| fallback active coordination | `Resgate em coordenação` |
 
 Avoid labels such as `Em atendimento` for open cases because they can imply the problem is already covered.
 
