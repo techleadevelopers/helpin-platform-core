@@ -51,7 +51,10 @@ fn authenticate_request(
     auth_service::verify_access_token(&state.config, token).map_err(|_| ApiError::Unauthorized)
 }
 
-pub(crate) fn optional_authenticated_user_id(state: &AppState, headers: &HeaderMap) -> Option<Uuid> {
+pub(crate) fn optional_authenticated_user_id(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<Uuid> {
     authenticate_request(state, headers)
         .ok()
         .and_then(|claims| Uuid::parse_str(&claims.sub).ok())
@@ -326,9 +329,7 @@ impl PostLocationAddress {
     }
 }
 
-fn resolve_post_location(
-    payload: &CreatePostRequest,
-) -> Result<ResolvedPostLocation, ApiError> {
+fn resolve_post_location(payload: &CreatePostRequest) -> Result<ResolvedPostLocation, ApiError> {
     if let Some(address) = payload.location_address.as_ref() {
         address.validate_complete()?;
         let label = address.label();
@@ -364,7 +365,11 @@ fn resolve_post_location(
             .unwrap_or_else(|| payload.location.clone()),
         latitude: payload.latitude,
         longitude: payload.longitude,
-        geo_status: if confirmed { "confirmed" } else { "unavailable" },
+        geo_status: if confirmed {
+            "confirmed"
+        } else {
+            "unavailable"
+        },
         geo_source: confirmed.then_some("gps_confirmed"),
         route_public: confirmed && payload.route_public.unwrap_or(false),
         enqueue_geocode: false,
@@ -430,7 +435,7 @@ pub async fn create_post(
     let requires_geo_alert = is_urgent || post_type == PostType::Emergency;
     let resolved_location = resolve_post_location(&payload)?;
 
-    let name = payload.name.unwrap_or_else(|| "Publicacao".into());
+    let name = payload.name.unwrap_or_else(|| "Publicação".into());
     let breed = payload.breed.unwrap_or_default();
     let age = payload.age.unwrap_or_default();
     let description = payload.description;
@@ -443,10 +448,17 @@ pub async fn create_post(
     let geo_status = resolved_location.geo_status;
     let geo_source = resolved_location.geo_source;
     let route_public = resolved_location.route_public
-        && matches!(post_type, PostType::Emergency | PostType::Lost | PostType::Found);
+        && matches!(
+            post_type,
+            PostType::Emergency | PostType::Lost | PostType::Found
+        );
     let text_only = media.is_empty() && payload.image.is_none();
     let geo_ready_for_alert = requires_geo_alert && geo_status == "confirmed";
-    let initial_rescue_status = if geo_ready_for_alert { "active" } else { "open" };
+    let initial_rescue_status = if geo_ready_for_alert {
+        "active"
+    } else {
+        "open"
+    };
 
     let mut tx = state.db.begin().await?;
     for (index, item) in media.iter().enumerate() {
@@ -627,6 +639,7 @@ pub async fn create_post(
             help_arrived_count: 0,
             operational_label: "Precisa de ajuda".to_string(),
         }),
+        rescue_final_report: None,
     };
 
     let rescue_fanout_state_id = if geo_ready_for_alert {
@@ -1132,7 +1145,7 @@ pub(crate) async fn load_post_by_id(
             p.id::text AS id,
             p.post_type::text AS post_type,
             p.animal_type,
-            COALESCE(p.name, 'Publicacao') AS name,
+            COALESCE(p.name, 'Publicação') AS name,
             COALESCE(p.breed, '') AS breed,
             COALESCE(p.age, '') AS age,
             p.description,
@@ -1238,6 +1251,10 @@ pub(crate) async fn load_post_by_id(
             geo_source: row.get("geo_source"),
             route_public: row.get("route_public"),
             rescue_operational: rescue_operational_from_row(&row),
+            rescue_final_report: super::rescue::load_published_final_report_for_post(
+                state, post_id,
+            )
+            .await?,
         };
         post.images = media_by_post.remove(&id).unwrap_or_default();
         if post.image.is_none() {
