@@ -75,6 +75,13 @@ pub struct RescueOperationalSummary {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RescueFinalReportPublic {
+    pub status: String,
+    pub public_update: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Post {
     pub id: String,
     #[serde(rename = "type")]
@@ -106,6 +113,7 @@ pub struct Post {
     pub geo_source: Option<String>,
     pub route_public: bool,
     pub rescue_operational: Option<RescueOperationalSummary>,
+    pub rescue_final_report: Option<RescueFinalReportPublic>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -451,6 +459,7 @@ fn post(
         geo_source: Some("gps_confirmed".into()),
         route_public: true,
         rescue_operational: None,
+        rescue_final_report: None,
     }
 }
 
