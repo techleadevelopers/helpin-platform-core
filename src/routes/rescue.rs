@@ -1,4 +1,4 @@
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
 use axum::{
     extract::{
@@ -11,6 +11,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 use validator::Validate;
@@ -23,6 +24,8 @@ use crate::{
 };
 
 const ACTIVE_RESCUE_LIMIT: i64 = 200;
+const FINAL_REPORT_SCHEMA_VERSION: &str = "1.0.0";
+const FINAL_REPORT_PROMPT_VERSION: &str = "rescue-final-report-v1";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +113,125 @@ pub struct RescueResponseAck {
     pub response: rescue_fanout::RescueResponseRecord,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RescueFinalStatus {
+    Rescued,
+    NotFound,
+    Died,
+    Referred,
+    Cancelled,
+    FalseAlarm,
+}
+
+impl RescueFinalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rescued => "rescued",
+            Self::NotFound => "not_found",
+            Self::Died => "died",
+            Self::Referred => "referred",
+            Self::Cancelled => "cancelled",
+            Self::FalseAlarm => "false_alarm",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "rescued" => Some(Self::Rescued),
+            "not_found" => Some(Self::NotFound),
+            "died" => Some(Self::Died),
+            "referred" => Some(Self::Referred),
+            "cancelled" => Some(Self::Cancelled),
+            "false_alarm" => Some(Self::FalseAlarm),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescueFinalReport {
+    pub id: String,
+    pub rescue_id: Option<String>,
+    pub post_id: String,
+    pub status: String,
+    pub summary: String,
+    pub public_update: String,
+    pub generated_by_ai: bool,
+    pub publication_status: String,
+    pub rejection_reason: Option<String>,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<String>,
+    pub rejected_by: Option<String>,
+    pub rejected_at: Option<String>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub admin_notes: Option<String>,
+    pub ai_model: Option<String>,
+    pub ai_latency_ms: Option<i32>,
+    pub ai_cost_cents: Option<i32>,
+    pub prompt_version: Option<String>,
+    pub schema_version: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescueFinalReportPublic {
+    pub status: String,
+    pub public_update: String,
+}
+
+#[derive(Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateFinalReportRequest {
+    pub status: Option<RescueFinalStatus>,
+}
+
+#[derive(Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveFinalReportRequest {
+    pub status: Option<RescueFinalStatus>,
+    #[validate(length(min = 1, max = 280))]
+    pub summary: Option<String>,
+    #[validate(length(min = 1, max = 140))]
+    pub public_update: Option<String>,
+}
+
+#[derive(Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct RejectFinalReportRequest {
+    #[validate(length(min = 1, max = 240))]
+    pub rejection_reason: String,
+}
+
+#[derive(Deserialize)]
+struct AiFinalReportResponse {
+    status_suggestion: RescueFinalStatus,
+    summary: String,
+    public_update: String,
+    generated_by_ai: bool,
+    ai_model: Option<String>,
+    ai_latency_ms: Option<i32>,
+    ai_cost_cents: Option<i32>,
+    prompt_version: Option<String>,
+    schema_version: Option<String>,
+}
+
+struct FinalReportDraft {
+    status: RescueFinalStatus,
+    summary: String,
+    public_update: String,
+    generated_by_ai: bool,
+    ai_model: Option<String>,
+    ai_latency_ms: Option<i32>,
+    ai_cost_cents: Option<i32>,
+    prompt_version: Option<String>,
+    schema_version: String,
+}
+
 fn default_response_action() -> String {
     "going".to_string()
 }
@@ -182,10 +304,10 @@ pub async fn trigger(
           AND longitude IS NOT NULL
         "#,
     )
-        .bind(post_id)
-        .bind(reporter_user_id)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(post_id)
+    .bind(reporter_user_id)
+    .fetch_optional(&state.db)
+    .await?;
     let (latitude, longitude) = confirmed_location.ok_or(ApiError::Forbidden)?;
 
     let mut tx = state.db.begin().await?;
@@ -331,6 +453,19 @@ pub async fn end(
     }
     tx.commit().await?;
     broadcast_rescue_event(&state, &rescue);
+    let auto_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            create_or_update_final_report(&auto_state, id, Some(RescueFinalStatus::Rescued), None)
+                .await
+        {
+            tracing::warn!(
+                ?error,
+                rescue_id = %id,
+                "failed to auto-generate rescue final report after rescue end"
+            );
+        }
+    });
     Ok(Json(RescueResponse { rescue }))
 }
 
@@ -442,6 +577,140 @@ pub async fn respond(
     .await?;
 
     Ok(Json(RescueResponseAck { response }))
+}
+
+pub async fn generate_final_report(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    payload: Option<Json<GenerateFinalReportRequest>>,
+) -> Result<(StatusCode, Json<RescueFinalReport>), ApiError> {
+    let claims = authenticate_claims(&state, &headers, None)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let is_admin = matches!(claims.account_type, AccountType::Admin);
+    ensure_rescue_manager(&state, id, user_id, is_admin).await?;
+
+    if let Some(Json(payload)) = payload.as_ref() {
+        payload
+            .validate()
+            .map_err(|error| ApiError::Validation(error.to_string()))?;
+    }
+    let requested_status = payload.and_then(|Json(value)| value.status);
+    let report = create_or_update_final_report(&state, id, requested_status, Some(user_id)).await?;
+    Ok((StatusCode::CREATED, Json(report)))
+}
+
+pub async fn get_final_report(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let report = load_final_report_by_rescue(&state, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    if let Ok(claims) = authenticate_claims(&state, &headers, None) {
+        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+        let is_admin = matches!(claims.account_type, AccountType::Admin);
+        if can_manage_rescue(&state, id, user_id, is_admin).await? {
+            return Ok(Json(
+                serde_json::to_value(report).map_err(|_| ApiError::Internal)?,
+            ));
+        }
+    }
+
+    if report.publication_status == "published" {
+        return Ok(Json(json!(RescueFinalReportPublic {
+            status: report.status,
+            public_update: report.public_update,
+        })));
+    }
+
+    Err(ApiError::NotFound)
+}
+
+pub async fn approve_final_report(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<ApproveFinalReportRequest>,
+) -> Result<Json<RescueFinalReport>, ApiError> {
+    payload
+        .validate()
+        .map_err(|error| ApiError::Validation(error.to_string()))?;
+    let claims = authenticate_claims(&state, &headers, None)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let is_admin = matches!(claims.account_type, AccountType::Admin);
+    ensure_rescue_manager(&state, id, user_id, is_admin).await?;
+
+    let report = sqlx::query(
+        r#"
+        UPDATE rescue_final_reports
+        SET status = COALESCE($2, status),
+            summary = COALESCE($3, summary),
+            public_update = COALESCE($4, public_update),
+            publication_status = 'published',
+            approved_by = $5,
+            approved_at = now(),
+            updated_by = $5,
+            updated_at = now()
+        WHERE rescue_id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(payload.status.map(|status| status.as_str()))
+    .bind(payload.summary)
+    .bind(payload.public_update)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .map(row_to_final_report)
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(report))
+}
+
+pub async fn reject_final_report(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<RejectFinalReportRequest>,
+) -> Result<Json<RescueFinalReport>, ApiError> {
+    payload
+        .validate()
+        .map_err(|error| ApiError::Validation(error.to_string()))?;
+    let reason = payload.rejection_reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::Validation("rejectionReason is required".into()));
+    }
+    let claims = authenticate_claims(&state, &headers, None)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let is_admin = matches!(claims.account_type, AccountType::Admin);
+    ensure_rescue_manager(&state, id, user_id, is_admin).await?;
+
+    let report = sqlx::query(
+        r#"
+        UPDATE rescue_final_reports
+        SET publication_status = 'rejected',
+            rejection_reason = $2,
+            rejected_by = $3,
+            rejected_at = now(),
+            updated_by = $3,
+            updated_at = now()
+        WHERE rescue_id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(reason)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .map(row_to_final_report)
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(report))
 }
 
 pub async fn rescue_ws(
@@ -562,6 +831,344 @@ fn row_to_rescue(row: sqlx::postgres::PgRow) -> RescueSession {
             .get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
             .to_rfc3339(),
     }
+}
+
+fn row_to_final_report(row: sqlx::postgres::PgRow) -> RescueFinalReport {
+    RescueFinalReport {
+        id: row.get::<Uuid, _>("id").to_string(),
+        rescue_id: row
+            .get::<Option<Uuid>, _>("rescue_id")
+            .map(|value| value.to_string()),
+        post_id: row.get::<Uuid, _>("post_id").to_string(),
+        status: row.get("status"),
+        summary: row.get("summary"),
+        public_update: row.get("public_update"),
+        generated_by_ai: row.get("generated_by_ai"),
+        publication_status: row.get("publication_status"),
+        rejection_reason: row.get("rejection_reason"),
+        approved_by: optional_uuid(&row, "approved_by"),
+        approved_at: optional_datetime(&row, "approved_at"),
+        rejected_by: optional_uuid(&row, "rejected_by"),
+        rejected_at: optional_datetime(&row, "rejected_at"),
+        created_by: optional_uuid(&row, "created_by"),
+        updated_by: optional_uuid(&row, "updated_by"),
+        admin_notes: row.get("admin_notes"),
+        ai_model: row.get("ai_model"),
+        ai_latency_ms: row.get("ai_latency_ms"),
+        ai_cost_cents: row.get("ai_cost_cents"),
+        prompt_version: row.get("prompt_version"),
+        schema_version: row.get("schema_version"),
+        created_at: row
+            .get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .to_rfc3339(),
+        updated_at: row
+            .get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .to_rfc3339(),
+    }
+}
+
+fn optional_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
+    row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column)
+        .ok()
+        .flatten()
+        .map(|value| value.to_rfc3339())
+}
+
+pub(crate) async fn load_published_final_report_for_post(
+    state: &AppState,
+    post_id: Uuid,
+) -> Result<Option<crate::domain::RescueFinalReportPublic>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT status, public_update
+        FROM rescue_final_reports
+        WHERE post_id = $1
+          AND publication_status = 'published'
+        "#,
+    )
+    .bind(post_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(row.map(|row| crate::domain::RescueFinalReportPublic {
+        status: row.get("status"),
+        public_update: row.get("public_update"),
+    }))
+}
+
+pub(crate) async fn load_published_final_reports_for_posts(
+    state: &AppState,
+    post_ids: &[Uuid],
+) -> Result<std::collections::HashMap<String, crate::domain::RescueFinalReportPublic>, sqlx::Error>
+{
+    if post_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT post_id::text AS post_id, status, public_update
+        FROM rescue_final_reports
+        WHERE post_id = ANY($1)
+          AND publication_status = 'published'
+        "#,
+    )
+    .bind(post_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("post_id"),
+                crate::domain::RescueFinalReportPublic {
+                    status: row.get("status"),
+                    public_update: row.get("public_update"),
+                },
+            )
+        })
+        .collect())
+}
+
+async fn load_final_report_by_rescue(
+    state: &AppState,
+    rescue_id: Uuid,
+) -> Result<Option<RescueFinalReport>, sqlx::Error> {
+    sqlx::query("SELECT * FROM rescue_final_reports WHERE rescue_id = $1")
+        .bind(rescue_id)
+        .fetch_optional(&state.db)
+        .await
+        .map(|row| row.map(row_to_final_report))
+}
+
+async fn ensure_rescue_manager(
+    state: &AppState,
+    rescue_id: Uuid,
+    user_id: Uuid,
+    is_admin: bool,
+) -> Result<(), ApiError> {
+    if can_manage_rescue(state, rescue_id, user_id, is_admin).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+async fn can_manage_rescue(
+    state: &AppState,
+    rescue_id: Uuid,
+    user_id: Uuid,
+    is_admin: bool,
+) -> Result<bool, ApiError> {
+    if is_admin {
+        return Ok(true);
+    }
+
+    let owns = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+          SELECT 1
+          FROM rescue_sessions rs
+          INNER JOIN posts p ON p.id = rs.post_id
+          WHERE rs.id = $1
+            AND p.author_id = $2
+        )
+        "#,
+    )
+    .bind(rescue_id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(owns)
+}
+
+async fn create_or_update_final_report(
+    state: &AppState,
+    rescue_id: Uuid,
+    requested_status: Option<RescueFinalStatus>,
+    created_by: Option<Uuid>,
+) -> Result<RescueFinalReport, ApiError> {
+    if let Some(existing) = load_final_report_by_rescue(state, rescue_id).await? {
+        if matches!(
+            existing.publication_status.as_str(),
+            "pending_approval" | "published"
+        ) {
+            return Ok(existing);
+        }
+    }
+
+    let post_id =
+        sqlx::query_scalar::<_, Uuid>("SELECT post_id FROM rescue_sessions WHERE id = $1")
+            .bind(rescue_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+
+    let draft = generate_final_report_draft(state, rescue_id, post_id, requested_status).await;
+    let draft = draft.unwrap_or_else(|error| {
+        tracing::warn!(?error, %rescue_id, %post_id, "AI final report failed; using deterministic fallback");
+        deterministic_final_report(requested_status.unwrap_or(RescueFinalStatus::Rescued))
+    });
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO rescue_final_reports (
+          id, rescue_id, post_id, status, summary, public_update, generated_by_ai,
+          publication_status, created_by, updated_by, ai_model, ai_latency_ms,
+          ai_cost_cents, prompt_version, schema_version
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, 'pending_approval', $8, $8, $9, $10, $11, $12, $13
+        )
+        ON CONFLICT (post_id) DO UPDATE
+        SET rescue_id = EXCLUDED.rescue_id,
+            status = EXCLUDED.status,
+            summary = EXCLUDED.summary,
+            public_update = EXCLUDED.public_update,
+            generated_by_ai = EXCLUDED.generated_by_ai,
+            publication_status = 'pending_approval',
+            rejection_reason = NULL,
+            updated_by = EXCLUDED.updated_by,
+            ai_model = EXCLUDED.ai_model,
+            ai_latency_ms = EXCLUDED.ai_latency_ms,
+            ai_cost_cents = EXCLUDED.ai_cost_cents,
+            prompt_version = EXCLUDED.prompt_version,
+            schema_version = EXCLUDED.schema_version,
+            updated_at = now()
+        WHERE rescue_final_reports.publication_status NOT IN ('pending_approval', 'published')
+        RETURNING *
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(rescue_id)
+    .bind(post_id)
+    .bind(draft.status.as_str())
+    .bind(draft.summary)
+    .bind(draft.public_update)
+    .bind(draft.generated_by_ai)
+    .bind(created_by)
+    .bind(draft.ai_model)
+    .bind(draft.ai_latency_ms)
+    .bind(draft.ai_cost_cents)
+    .bind(draft.prompt_version)
+    .bind(draft.schema_version)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if let Some(row) = row {
+        return Ok(row_to_final_report(row));
+    }
+
+    load_final_report_by_rescue(state, rescue_id)
+        .await?
+        .ok_or(ApiError::Conflict("final report already exists".into()))
+}
+
+async fn generate_final_report_draft(
+    state: &AppState,
+    rescue_id: Uuid,
+    post_id: Uuid,
+    requested_status: Option<RescueFinalStatus>,
+) -> Result<FinalReportDraft, ApiError> {
+    let fallback_status = requested_status.unwrap_or(RescueFinalStatus::Rescued);
+    let worker_url = state.config.ai_worker_url.trim().trim_end_matches('/');
+    if worker_url.is_empty() {
+        return Ok(deterministic_final_report(fallback_status));
+    }
+
+    let started = Instant::now();
+    let response = reqwest::Client::new()
+        .post(format!("{worker_url}/ai/final-rescue-report"))
+        .json(&json!({
+            "rescue_id": rescue_id.to_string(),
+            "post_id": post_id.to_string(),
+            "requested_status": requested_status.map(|status| status.as_str()),
+        }))
+        .timeout(StdDuration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable)?;
+
+    if !response.status().is_success() {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    let ai = response
+        .json::<AiFinalReportResponse>()
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable)?;
+
+    Ok(FinalReportDraft {
+        status: ai.status_suggestion,
+        summary: trim_report_text(ai.summary, 280),
+        public_update: trim_report_text(ai.public_update, 140),
+        generated_by_ai: ai.generated_by_ai,
+        ai_model: ai.ai_model,
+        ai_latency_ms: ai
+            .ai_latency_ms
+            .or_else(|| Some(started.elapsed().as_millis().min(i32::MAX as u128) as i32)),
+        ai_cost_cents: ai.ai_cost_cents,
+        prompt_version: ai
+            .prompt_version
+            .or_else(|| Some(FINAL_REPORT_PROMPT_VERSION.into())),
+        schema_version: ai
+            .schema_version
+            .unwrap_or_else(|| FINAL_REPORT_SCHEMA_VERSION.to_string()),
+    })
+}
+
+fn deterministic_final_report(status: RescueFinalStatus) -> FinalReportDraft {
+    let (summary, public_update) = final_report_fallback_text(status);
+    FinalReportDraft {
+        status,
+        summary: summary.to_string(),
+        public_update: public_update.to_string(),
+        generated_by_ai: false,
+        ai_model: None,
+        ai_latency_ms: Some(0),
+        ai_cost_cents: Some(0),
+        prompt_version: Some(FINAL_REPORT_PROMPT_VERSION.into()),
+        schema_version: FINAL_REPORT_SCHEMA_VERSION.into(),
+    }
+}
+
+fn final_report_fallback_text(status: RescueFinalStatus) -> (&'static str, &'static str) {
+    match status {
+        RescueFinalStatus::Rescued => (
+            "Animal localizado e encaminhado para atendimento ou segurança.",
+            "Atualização: o animal foi resgatado e está recebendo cuidados.",
+        ),
+        RescueFinalStatus::NotFound => (
+            "A equipe não conseguiu localizar o animal após acompanhamento do caso.",
+            "Atualização: o animal ainda não foi localizado.",
+        ),
+        RescueFinalStatus::Died => (
+            "O animal foi encontrado sem vida.",
+            "Atualização: o caso foi encerrado após a confirmação do óbito.",
+        ),
+        RescueFinalStatus::Referred => (
+            "O caso foi encaminhado para responsável, ONG, clínica ou órgão competente.",
+            "Atualização: o caso foi encaminhado para acompanhamento especializado.",
+        ),
+        RescueFinalStatus::Cancelled => (
+            "O chamado foi cancelado antes da conclusão.",
+            "Atualização: o chamado foi cancelado.",
+        ),
+        RescueFinalStatus::FalseAlarm => (
+            "O alerta foi avaliado como falso ou equivocado.",
+            "Atualização: o alerta foi encerrado após verificação.",
+        ),
+    }
+}
+
+fn trim_report_text(value: String, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    trimmed.chars().take(max_chars).collect()
 }
 
 fn optional_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
