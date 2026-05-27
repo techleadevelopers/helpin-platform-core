@@ -434,6 +434,11 @@ pub async fn create_post(
     let post_type = payload.post_type.clone();
     let requires_geo_alert = is_urgent || post_type == PostType::Emergency;
     let resolved_location = resolve_post_location(&payload)?;
+    if requires_geo_alert && resolved_location.geo_status != "confirmed" {
+        return Err(ApiError::Validation(
+            "emergency and urgent posts require gps-confirmed latitude and longitude".into(),
+        ));
+    }
 
     let name = payload.name.unwrap_or_else(|| "Publicação".into());
     let breed = payload.breed.unwrap_or_default();
