@@ -346,6 +346,25 @@ pub async fn trigger(
 
     let rescue_uuid = Uuid::parse_str(&rescue.id).ok();
     let _ = rescue_fanout::create_fanout_state_for_post(&state.db, post_id, rescue_uuid).await?;
+    if let Some(rescue_uuid) = rescue_uuid {
+        if let Err(error) = insert_rescue_event(
+            &state,
+            rescue_uuid,
+            post_id,
+            "rescue_started",
+            Some(reporter_user_id),
+            Some("Resgate iniciado pelo autor do caso"),
+            json!({
+                "lat": rescue.lat,
+                "lng": rescue.lng,
+                "accuracy": rescue.accuracy
+            }),
+        )
+        .await
+        {
+            tracing::warn!(?error, rescue_id = %rescue.id, "failed to persist rescue_started event");
+        }
+    }
     broadcast_rescue_event(&state, &rescue);
     Ok((StatusCode::CREATED, Json(RescueResponse { rescue })))
 }
@@ -398,6 +417,25 @@ pub async fn update_location(
     insert_location_point(&mut tx, &rescue.id, rescue.lat, rescue.lng, rescue.accuracy).await?;
     tx.commit().await?;
 
+    if let Ok(post_id) = Uuid::parse_str(&rescue.post_id) {
+        if let Err(error) = insert_rescue_event(
+            &state,
+            id,
+            post_id,
+            "location_updated",
+            Some(user_id),
+            Some("Localizacao do resgate atualizada"),
+            json!({
+                "lat": rescue.lat,
+                "lng": rescue.lng,
+                "accuracy": rescue.accuracy
+            }),
+        )
+        .await
+        {
+            tracing::warn!(?error, rescue_id = %id, "failed to persist location_updated event");
+        }
+    }
     broadcast_rescue_event(&state, &rescue);
     Ok(Json(RescueResponse { rescue }))
 }
@@ -453,6 +491,21 @@ pub async fn end(
     }
     tx.commit().await?;
     broadcast_rescue_event(&state, &rescue);
+    if let Ok(post_id) = Uuid::parse_str(&rescue.post_id) {
+        if let Err(error) = insert_rescue_event(
+            &state,
+            id,
+            post_id,
+            "rescue_ended",
+            Some(user_id),
+            Some("Resgate encerrado e marcado como resolvido"),
+            json!({ "status": "resolved", "finalStatus": "rescued" }),
+        )
+        .await
+        {
+            tracing::warn!(?error, rescue_id = %id, "failed to persist rescue_ended event");
+        }
+    }
     let auto_state = state.clone();
     tokio::spawn(async move {
         if let Err(error) =
@@ -487,15 +540,12 @@ pub async fn incident(
     )
     .await?;
 
-    let exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM rescue_sessions WHERE id = $1)")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
+    let post_id = sqlx::query_scalar::<_, Uuid>("SELECT post_id FROM rescue_sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
 
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
+    let post_id = post_id.ok_or(ApiError::NotFound)?;
 
     let incident_id = Uuid::now_v7();
     sqlx::query(
@@ -510,6 +560,20 @@ pub async fn incident(
     .bind(serde_json::to_value(payload.attachments).unwrap_or_else(|_| serde_json::json!([])))
     .execute(&state.db)
     .await?;
+
+    if let Err(error) = insert_rescue_event(
+        &state,
+        id,
+        post_id,
+        "incident_reported",
+        Some(user_id),
+        Some("Incidente reportado durante o resgate"),
+        json!({ "incidentId": incident_id, "attachmentsCount": payload.attachments.len() }),
+    )
+    .await
+    {
+        tracing::warn!(?error, rescue_id = %id, "failed to persist incident_reported event");
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -576,6 +640,29 @@ pub async fn respond(
     )
     .await?;
 
+    let event_type = match response.status.as_str() {
+        "arrived" => "volunteer_arrived",
+        "cancelled" => "volunteer_cancelled",
+        _ => "volunteer_confirmed",
+    };
+    if let Err(error) = insert_rescue_event(
+        &state,
+        id,
+        post_id,
+        event_type,
+        Some(user_id),
+        Some("Resposta de voluntario registrada"),
+        json!({
+            "action": payload.action,
+            "status": payload.status,
+            "etaSeconds": payload.eta_seconds
+        }),
+    )
+    .await
+    {
+        tracing::warn!(?error, rescue_id = %id, "failed to persist rescue response event");
+    }
+
     Ok(Json(RescueResponseAck { response }))
 }
 
@@ -588,6 +675,13 @@ pub async fn generate_final_report(
     let claims = authenticate_claims(&state, &headers, None)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let is_admin = matches!(claims.account_type, AccountType::Admin);
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:final-report:generate:{id}:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     ensure_rescue_manager(&state, id, user_id, is_admin).await?;
 
     if let Some(Json(payload)) = payload.as_ref() {
@@ -641,6 +735,13 @@ pub async fn approve_final_report(
     let claims = authenticate_claims(&state, &headers, None)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let is_admin = matches!(claims.account_type, AccountType::Admin);
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:final-report:approve:{id}:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     ensure_rescue_manager(&state, id, user_id, is_admin).await?;
 
     let report = sqlx::query(
@@ -668,6 +769,13 @@ pub async fn approve_final_report(
     .map(row_to_final_report)
     .ok_or(ApiError::NotFound)?;
 
+    tracing::info!(
+        rescue_id = %id,
+        report_id = %report.id,
+        approved_by = %user_id,
+        "rescue final report published"
+    );
+
     Ok(Json(report))
 }
 
@@ -687,6 +795,13 @@ pub async fn reject_final_report(
     let claims = authenticate_claims(&state, &headers, None)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let is_admin = matches!(claims.account_type, AccountType::Admin);
+    rate_limit::check_key(
+        &state,
+        &format!("rescue:final-report:reject:{id}:{user_id}"),
+        state.config.throttle_limit,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
     ensure_rescue_manager(&state, id, user_id, is_admin).await?;
 
     let report = sqlx::query(
@@ -709,6 +824,13 @@ pub async fn reject_final_report(
     .await?
     .map(row_to_final_report)
     .ok_or(ApiError::NotFound)?;
+
+    tracing::info!(
+        rescue_id = %id,
+        report_id = %report.id,
+        rejected_by = %user_id,
+        "rescue final report rejected"
+    );
 
     Ok(Json(report))
 }
@@ -1077,15 +1199,12 @@ async fn generate_final_report_draft(
     if worker_url.is_empty() {
         return Ok(deterministic_final_report(fallback_status));
     }
+    let ai_context = build_final_report_ai_context(state, rescue_id, post_id, requested_status).await?;
 
     let started = Instant::now();
     let response = reqwest::Client::new()
         .post(format!("{worker_url}/ai/final-rescue-report"))
-        .json(&json!({
-            "rescue_id": rescue_id.to_string(),
-            "post_id": post_id.to_string(),
-            "requested_status": requested_status.map(|status| status.as_str()),
-        }))
+        .json(&ai_context)
         .timeout(StdDuration::from_secs(3))
         .send()
         .await
@@ -1099,6 +1218,15 @@ async fn generate_final_report_draft(
         .json::<AiFinalReportResponse>()
         .await
         .map_err(|_| ApiError::ServiceUnavailable)?;
+
+    tracing::info!(
+        rescue_id = %rescue_id,
+        post_id = %post_id,
+        generated_by_ai = ai.generated_by_ai,
+        latency_ms = started.elapsed().as_millis() as u64,
+        model = ai.ai_model.as_deref().unwrap_or("fallback"),
+        "rescue final report worker response"
+    );
 
     Ok(FinalReportDraft {
         status: ai.status_suggestion,
@@ -1117,6 +1245,126 @@ async fn generate_final_report_draft(
             .schema_version
             .unwrap_or_else(|| FINAL_REPORT_SCHEMA_VERSION.to_string()),
     })
+}
+
+async fn build_final_report_ai_context(
+    state: &AppState,
+    rescue_id: Uuid,
+    post_id: Uuid,
+    requested_status: Option<RescueFinalStatus>,
+) -> Result<serde_json::Value, ApiError> {
+    let post = sqlx::query(
+        r#"
+        SELECT id::text, post_type::text, animal_type, name, description,
+               neighborhood, location_label, rescue_status, created_at, resolved_at
+        FROM posts
+        WHERE id = $1
+        "#,
+    )
+    .bind(post_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let rescue = sqlx::query(
+        r#"
+        SELECT id::text, status, lat, lng, accuracy, created_at, updated_at, ended_at
+        FROM rescue_sessions
+        WHERE id = $1
+        "#,
+    )
+    .bind(rescue_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    let events = sqlx::query(
+        r#"
+        SELECT type, actor_id::text AS actor_id, message, metadata, created_at
+        FROM rescue_events
+        WHERE rescue_id = $1
+        ORDER BY created_at ASC
+        LIMIT 80
+        "#,
+    )
+    .bind(rescue_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let responses = sqlx::query(
+        r#"
+        SELECT action, status, eta_seconds, created_at, updated_at
+        FROM rescue_responses
+        WHERE rescue_session_id = $1 OR post_id = $2
+        ORDER BY updated_at ASC
+        LIMIT 80
+        "#,
+    )
+    .bind(rescue_id)
+    .bind(post_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let incidents = sqlx::query(
+        r#"
+        SELECT description, status, created_at
+        FROM rescue_incidents
+        WHERE rescue_id = $1
+        ORDER BY created_at ASC
+        LIMIT 40
+        "#,
+    )
+    .bind(rescue_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(json!({
+        "rescue_id": rescue_id.to_string(),
+        "post_id": post_id.to_string(),
+        "requested_status": requested_status.map(|status| status.as_str()),
+        "post": {
+            "id": post.get::<String, _>("id"),
+            "type": post.get::<String, _>("post_type"),
+            "animalType": post.get::<String, _>("animal_type"),
+            "name": redact_sensitive_text(post.get::<String, _>("name")),
+            "description": redact_sensitive_text(post.get::<String, _>("description")),
+            "neighborhood": post.get::<Option<String>, _>("neighborhood"),
+            "locationLabel": post.get::<Option<String>, _>("location_label"),
+            "rescueStatus": post.get::<String, _>("rescue_status"),
+            "createdAt": post.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            "resolvedAt": post.get::<Option<chrono::DateTime<chrono::Utc>>, _>("resolved_at").map(|value| value.to_rfc3339()),
+        },
+        "rescue": {
+            "id": rescue.get::<String, _>("id"),
+            "status": rescue.get::<String, _>("status"),
+            "lat": rescue.get::<f64, _>("lat"),
+            "lng": rescue.get::<f64, _>("lng"),
+            "accuracy": rescue.get::<Option<f64>, _>("accuracy"),
+            "createdAt": rescue.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            "updatedAt": rescue.get::<chrono::DateTime<chrono::Utc>, _>("updated_at").to_rfc3339(),
+            "endedAt": rescue.get::<Option<chrono::DateTime<chrono::Utc>>, _>("ended_at").map(|value| value.to_rfc3339()),
+        },
+        "events": events.into_iter().map(|row| json!({
+            "type": row.get::<String, _>("type"),
+            "actorId": row.get::<Option<String>, _>("actor_id"),
+            "message": row.get::<Option<String>, _>("message"),
+            "metadata": row.get::<serde_json::Value, _>("metadata"),
+            "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+        })).collect::<Vec<_>>(),
+        "rescue_responses": responses.into_iter().map(|row| json!({
+            "action": row.get::<String, _>("action"),
+            "status": row.get::<String, _>("status"),
+            "etaSeconds": row.get::<Option<i32>, _>("eta_seconds"),
+            "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            "updatedAt": row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at").to_rfc3339(),
+        })).collect::<Vec<_>>(),
+        "incidents": incidents.into_iter().map(|row| json!({
+            "description": redact_sensitive_text(row.get::<String, _>("description")),
+            "status": row.get::<String, _>("status"),
+            "createdAt": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+        })).collect::<Vec<_>>(),
+        "chat_summary": null,
+    }))
 }
 
 fn deterministic_final_report(status: RescueFinalStatus) -> FinalReportDraft {
