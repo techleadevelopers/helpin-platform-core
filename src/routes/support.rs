@@ -154,11 +154,10 @@ pub async fn add_message(
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
-    let exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM support_tickets WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
+    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM support_tickets WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -183,10 +182,7 @@ pub async fn add_message(
     Ok((StatusCode::CREATED, Json(row_to_message(row))))
 }
 
-async fn load_messages(
-    state: &AppState,
-    ticket_id: Uuid,
-) -> Result<Vec<SupportMessage>, ApiError> {
+async fn load_messages(state: &AppState, ticket_id: Uuid) -> Result<Vec<SupportMessage>, ApiError> {
     let rows = sqlx::query(
         r#"
         SELECT id, body, author_type, created_at
