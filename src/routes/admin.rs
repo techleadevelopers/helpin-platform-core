@@ -102,6 +102,36 @@ pub struct PostReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RescueFinalReportAdmin {
+    pub id: String,
+    pub rescue_id: Option<String>,
+    pub post_id: String,
+    pub post_title: String,
+    pub post_type: String,
+    pub status: String,
+    pub summary: String,
+    pub public_update: String,
+    pub generated_by_ai: bool,
+    pub publication_status: String,
+    pub rejection_reason: Option<String>,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<DateTime<Utc>>,
+    pub rejected_by: Option<String>,
+    pub rejected_at: Option<DateTime<Utc>>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub admin_notes: Option<String>,
+    pub ai_model: Option<String>,
+    pub ai_latency_ms: Option<i32>,
+    pub ai_cost_cents: Option<i32>,
+    pub prompt_version: Option<String>,
+    pub schema_version: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminOngProfile {
     pub id: String,
     pub user_id: String,
@@ -640,6 +670,49 @@ pub async fn list_post_reports(
     .await?;
 
     Ok(Json(rows.into_iter().map(row_to_post_report).collect()))
+}
+
+pub async fn list_rescue_final_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<RescueFinalReportAdmin>>, ApiError> {
+    authenticate_admin(&state, &headers)?;
+    let status = query
+        .get("status")
+        .map(String::as_str)
+        .unwrap_or("pending_approval");
+    if !matches!(
+        status,
+        "draft" | "pending_approval" | "published" | "rejected" | "all"
+    ) {
+        return Err(ApiError::Validation("invalid report status".into()));
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          rfr.*,
+          COALESCE(p.name, 'Publicacao') AS post_title,
+          p.post_type::text AS post_type
+        FROM rescue_final_reports rfr
+        JOIN posts p ON p.id = rfr.post_id
+        WHERE ($1 = 'all' OR rfr.publication_status = $1)
+        ORDER BY
+          CASE WHEN rfr.publication_status = 'pending_approval' THEN 0 ELSE 1 END,
+          rfr.created_at ASC
+        LIMIT 200
+        "#,
+    )
+    .bind(status)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(row_to_rescue_final_report_admin)
+            .collect(),
+    ))
 }
 
 pub async fn queue_status(
