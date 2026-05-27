@@ -1,4 +1,4 @@
-# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> ZooHelp Hybrid Core
+# <img src="https://res.cloudinary.com/limpeja/image/upload/v1779071066/Gemini_Generated_Image_v5ufmcv5ufmcv5uf-removebg-preview_lcxvg8.png" alt="ZooHelp Logo" width="58" align="center"> Helpin Hybrid Core
 
 `zoohelp-backend` is the Rust-first backend infrastructure for ZooHelp, a geolocation-driven animal rescue, adoption, NGO coordination, trust, notification, and community protection platform.
 
