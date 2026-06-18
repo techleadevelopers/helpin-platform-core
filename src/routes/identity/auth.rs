@@ -22,7 +22,7 @@ use crate::{
 pub struct LoginRequest {
     #[validate(email)]
     pub email: String,
-    #[validate(length(min = 8))]
+    #[validate(length(min = 6))]
     pub password: String,
 }
 #[derive(Debug, Deserialize, Validate)]
