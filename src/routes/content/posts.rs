@@ -117,6 +117,11 @@ fn animal_type_as_str(value: &AnimalType) -> &'static str {
     match value {
         AnimalType::Dog => "dog",
         AnimalType::Cat => "cat",
+        AnimalType::Bird => "bird",
+        AnimalType::Wildlife => "wildlife",
+        AnimalType::Reptile => "reptile",
+        AnimalType::Livestock => "livestock",
+        AnimalType::Marine => "marine",
         AnimalType::Other => "other",
     }
 }
@@ -125,6 +130,11 @@ pub fn animal_type_from_str(value: &str) -> AnimalType {
     match value {
         "dog" => AnimalType::Dog,
         "cat" => AnimalType::Cat,
+        "bird" => AnimalType::Bird,
+        "wildlife" => AnimalType::Wildlife,
+        "reptile" => AnimalType::Reptile,
+        "livestock" => AnimalType::Livestock,
+        "marine" => AnimalType::Marine,
         _ => AnimalType::Other,
     }
 }
@@ -205,6 +215,20 @@ pub struct LikeResponse {
     pub post_id: String,
     pub liked: bool,
     pub likes: u32,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePostRequest {
+    #[validate(length(max = 40))]
+    pub channel: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePostResponse {
+    pub post_id: String,
+    pub shares: u32,
 }
 
 #[derive(Serialize)]
@@ -878,6 +902,76 @@ pub async fn unlike_post(
         post_id: id,
         liked: false,
         likes: likes.max(0) as u32,
+    }))
+}
+
+pub async fn share_post(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<SharePostRequest>,
+) -> Result<Json<SharePostResponse>, ApiError> {
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+
+    let claims = authenticate_request(&state, &headers)?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_key(
+        &state,
+        &format!("posts:share:{user_id}"),
+        state.config.throttle_limit * 4,
+        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+    )
+    .await?;
+    let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    ensure_post_exists(&state, post_id).await?;
+
+    let channel = payload
+        .channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("system_share");
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO post_shares (post_id, user_id, channel)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(post_id)
+    .bind(user_id)
+    .bind(channel)
+    .execute(&mut *tx)
+    .await?;
+    let shares = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE posts
+        SET shares_count = (
+          SELECT COUNT(*)::int FROM post_shares WHERE post_id = $1
+        )
+        WHERE id = $1
+        RETURNING shares_count
+        "#,
+    )
+    .bind(post_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    audit_event(
+        &state,
+        Some(user_id),
+        "post.shared",
+        serde_json::json!({ "postId": post_id, "channel": channel, "shares": shares }),
+    )
+    .await;
+
+    Ok(Json(SharePostResponse {
+        post_id: id,
+        shares: shares.max(0) as u32,
     }))
 }
 
