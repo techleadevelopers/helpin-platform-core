@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
     Router,
 };
 
@@ -44,6 +44,8 @@ mod support;
 mod trust;
 #[path = "identity/users.rs"]
 mod users;
+#[path = "operations/volunteers.rs"]
+mod volunteers;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -118,6 +120,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/me/avatar", patch(auth::update_avatar))
         .route(
+            "/v1/me/volunteer-profile",
+            get(volunteers::get_my_profile).put(volunteers::upsert_my_profile),
+        )
+        .route(
             "/v1/me/ong/kyb-documents",
             post(admin::create_my_kyb_document),
         )
@@ -134,6 +140,7 @@ pub fn router(state: AppState) -> Router {
                 .put(posts::like_post)
                 .delete(posts::unlike_post),
         )
+        .route("/v1/posts/:id/share", post(posts::share_post))
         .route(
             "/v1/posts/:id/comments",
             get(posts::list_comments).post(posts::create_comment),
@@ -174,6 +181,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ongs/:id", get(ongs::get_ong))
         .route("/v1/ongs/:id/follow", post(ongs::follow_ong))
         .route("/v1/donations/intents", post(donations::create_intent))
+        .route(
+            "/v1/contributions/maintenance/intents",
+            post(donations::create_maintenance_intent),
+        )
         .route(
             "/v1/donations/webhooks/:provider",
             post(donations::payment_webhook),
