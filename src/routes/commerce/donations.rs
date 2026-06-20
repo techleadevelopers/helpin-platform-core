@@ -19,14 +19,26 @@ pub struct DonationIntentRequest {
     pub currency: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceContributionRequest {
+    #[validate(range(min = 10, max = 100))]
+    pub amount_cents: i64,
+    #[validate(length(max = 280))]
+    pub public_message: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DonationIntentResponse {
     pub id: String,
-    pub ong_id: String,
+    pub ong_id: Option<String>,
     pub amount_cents: i64,
     pub currency: String,
+    pub purpose: String,
+    pub recurrence: String,
     pub status: String,
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,10 +108,11 @@ pub async fn create_intent(
     let row = sqlx::query(
         r#"
         INSERT INTO donations (
-          donor_id, ong_id, amount_cents, currency, provider, provider_reference, status, idempotency_key
+          donor_id, ong_id, amount_cents, currency, provider, provider_reference,
+          status, idempotency_key, purpose, recurrence
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'pending_provider', $7)
-        RETURNING id, ong_id, amount_cents, currency, status
+        VALUES ($1, $2, $3, $4, $5, $6, 'pending_provider', $7, 'ong_donation', 'one_time')
+        RETURNING id, ong_id, amount_cents, currency, purpose, recurrence, status
         "#,
     )
     .bind(donor_id)
@@ -125,6 +138,89 @@ pub async fn create_intent(
     .bind(payload.amount_cents)
     .bind(&currency)
     .bind(serde_json::json!({ "provider": provider, "providerReference": provider_reference }))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(Json(row_to_response(row)))
+}
+
+pub async fn create_maintenance_intent(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<MaintenanceContributionRequest>,
+) -> Result<Json<DonationIntentResponse>, ApiError> {
+    if !state.config.payments_enabled {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    payload
+        .validate()
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
+
+    let claims = authenticate_request(&state, &headers)?;
+    let donor_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(key) = &idempotency_key {
+        if let Some(existing) = find_existing_intent(&state, donor_id, key).await? {
+            return Ok(Json(existing));
+        }
+    }
+
+    let provider = &state.config.payment_provider;
+    if !state.config.is_development() && provider == "manual_psp_required" {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    let message = payload
+        .public_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let provider_reference = format!("{provider}-maintenance-{}", Uuid::now_v7());
+
+    let mut tx = state.db.begin().await?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO donations (
+          donor_id, ong_id, amount_cents, currency, provider, provider_reference,
+          status, idempotency_key, purpose, recurrence, public_message
+        )
+        VALUES ($1, NULL, $2, 'BRL', $3, $4, 'pending_provider', $5,
+                'platform_maintenance', 'monthly', $6)
+        RETURNING id, ong_id, amount_cents, currency, purpose, recurrence, status
+        "#,
+    )
+    .bind(donor_id)
+    .bind(payload.amount_cents)
+    .bind(provider)
+    .bind(&provider_reference)
+    .bind(idempotency_key.as_deref())
+    .bind(message)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let donation_id: Uuid = row.get("id");
+    sqlx::query(
+        r#"
+        INSERT INTO donation_ledger_entries (
+          donation_id, entry_type, amount_cents, currency, metadata
+        )
+        VALUES ($1, 'maintenance_intent_created', $2, 'BRL', $3)
+        "#,
+    )
+    .bind(donation_id)
+    .bind(payload.amount_cents)
+    .bind(serde_json::json!({
+        "provider": provider,
+        "providerReference": provider_reference,
+        "copy": maintenance_copy()
+    }))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -232,7 +328,7 @@ async fn find_existing_intent(
 ) -> Result<Option<DonationIntentResponse>, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT id, ong_id, amount_cents, currency, status
+        SELECT id, ong_id, amount_cents, currency, purpose, recurrence, status
         FROM donations
         WHERE donor_id = $1 AND idempotency_key = $2
         "#,
@@ -248,11 +344,20 @@ async fn find_existing_intent(
 fn row_to_response(row: sqlx::postgres::PgRow) -> DonationIntentResponse {
     DonationIntentResponse {
         id: row.get::<Uuid, _>("id").to_string(),
-        ong_id: row.get::<Uuid, _>("ong_id").to_string(),
+        ong_id: row
+            .get::<Option<Uuid>, _>("ong_id")
+            .map(|value| value.to_string()),
         amount_cents: row.get("amount_cents"),
         currency: row.get::<String, _>("currency"),
+        purpose: row.get("purpose"),
+        recurrence: row.get("recurrence"),
         status: row.get("status"),
+        message: maintenance_copy().to_string(),
     }
+}
+
+fn maintenance_copy() -> &'static str {
+    "O ZooHelp continuará gratuito para resgates, adoções e apoio animal. Esta contribuição voluntária ajuda a manter servidores, notificações, armazenamento de fotos, monitoramento, moderação e operação da plataforma."
 }
 
 fn normalize_currency(value: Option<&str>) -> Result<String, ApiError> {
