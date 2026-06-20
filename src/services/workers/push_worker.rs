@@ -19,6 +19,11 @@ struct PushJob {
     payload: Value,
 }
 
+struct PushDeliveryResult {
+    provider_response: Value,
+    provider_ticket_id: Option<String>,
+}
+
 pub fn spawn(config: Config, db: PgPool) {
     if !config.push_worker_enabled {
         return;
@@ -81,23 +86,32 @@ async fn deliver_or_defer(
 ) -> anyhow::Result<()> {
     if matches!(config.push_provider.as_str(), "expo") {
         match send_expo_push(config, client, &job).await {
-            Ok(()) => {
+            Ok(result) => {
                 sqlx::query(
                     r#"
                     UPDATE push_delivery_jobs
                     SET status = 'sent',
                         updated_at = now(),
-                        last_error = NULL
+                        last_error = NULL,
+                        provider_response = $2,
+                        provider_ticket_id = $3,
+                        delivered_at = now()
                     WHERE id = $1
                     "#,
                 )
                 .bind(job.id)
+                .bind(result.provider_response)
+                .bind(result.provider_ticket_id)
                 .execute(db)
                 .await?;
                 return Ok(());
             }
             Err(error) => {
-                defer_delivery(db, job.id, job.attempts, error.to_string()).await?;
+                let message = error.to_string();
+                if is_invalid_token_error(&message) {
+                    invalidate_push_token(db, &job.push_token, &message).await?;
+                }
+                defer_delivery(db, job.id, job.attempts, message).await?;
                 return Ok(());
             }
         }
@@ -115,7 +129,11 @@ async fn deliver_or_defer(
     .await
 }
 
-async fn send_expo_push(config: &Config, client: &Client, job: &PushJob) -> anyhow::Result<()> {
+async fn send_expo_push(
+    config: &Config,
+    client: &Client,
+    job: &PushJob,
+) -> anyhow::Result<PushDeliveryResult> {
     let title = job
         .payload
         .get("title")
@@ -167,7 +185,14 @@ async fn send_expo_push(config: &Config, client: &Client, job: &PushJob) -> anyh
         anyhow::bail!("{error}");
     }
 
-    Ok(())
+    Ok(PushDeliveryResult {
+        provider_ticket_id: body
+            .get("data")
+            .and_then(|data| data.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        provider_response: body,
+    })
 }
 
 fn expo_response_error(body: &Value) -> Option<String> {
@@ -183,6 +208,27 @@ fn expo_response_error(body: &Value) -> Option<String> {
         .unwrap_or("expo push rejected delivery");
     let details = data.get("details").cloned().unwrap_or(Value::Null);
     Some(format!("{message}: {details}"))
+}
+
+fn is_invalid_token_error(message: &str) -> bool {
+    message.contains("DeviceNotRegistered") || message.contains("InvalidCredentials")
+}
+
+async fn invalidate_push_token(db: &PgPool, push_token: &str, error: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE push_subscriptions
+        SET invalidated_at = COALESCE(invalidated_at, now()),
+            last_delivery_error = $2,
+            updated_at = now()
+        WHERE push_token = $1
+        "#,
+    )
+    .bind(push_token)
+    .bind(error)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 async fn defer_delivery(
