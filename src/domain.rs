@@ -28,6 +28,11 @@ pub enum AccountType {
 pub enum AnimalType {
     Dog,
     Cat,
+    Bird,
+    Wildlife,
+    Reptile,
+    Livestock,
+    Marine,
     Other,
 }
 
