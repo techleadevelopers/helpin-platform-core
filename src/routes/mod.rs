@@ -49,6 +49,7 @@ mod volunteers;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(health::healthz))
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(observability::metrics))
