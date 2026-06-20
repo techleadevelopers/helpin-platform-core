@@ -232,6 +232,7 @@ pub async fn upsert_rescue_response(
     .await?;
 
     refresh_fanout_response_counts(db, post_id).await?;
+    refresh_volunteer_profile_counts(db, user_id).await?;
     pause_fanout_if_confirmed(db, post_id).await?;
 
     Ok(RescueResponseRecord {
@@ -246,6 +247,32 @@ pub async fn upsert_rescue_response(
         created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
         updated_at: row.get::<DateTime<Utc>, _>("updated_at").to_rfc3339(),
     })
+}
+
+async fn refresh_volunteer_profile_counts(db: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE volunteer_profiles
+        SET responses_count = (
+              SELECT count(DISTINCT post_id)::bigint
+              FROM rescue_responses
+              WHERE user_id = $1
+                AND status IN ('confirmed', 'arrived')
+            ),
+            arrived_count = (
+              SELECT count(DISTINCT post_id)::bigint
+              FROM rescue_responses
+              WHERE user_id = $1
+                AND status = 'arrived'
+            ),
+            updated_at = now()
+        WHERE user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -881,6 +908,7 @@ async fn ranked_candidates(
     phase: FanoutPhase,
 ) -> Result<Vec<Candidate>, sqlx::Error> {
     let (lat, lng) = confirmed_coords(post)?;
+    let scopes = animal_scopes_for_post(post);
     let lat_delta = phase.radius_km / EARTH_KM_PER_DEGREE;
     let lng_delta = longitude_delta_for_radius(lat, phase.radius_km);
     let rows = sqlx::query(
@@ -897,6 +925,12 @@ async fn ranked_candidates(
           u.trust_score,
           u.verified,
           u.account_type::text AS account_type,
+          COALESCE(vp.active, false) AS volunteer_active,
+          COALESCE(vp.verified, false) AS volunteer_verified,
+          COALESCE(vp.responses_count, 0)::bigint AS volunteer_responses_count,
+          COALESCE(vp.arrived_count, 0)::bigint AS volunteer_arrived_count,
+          vp.service_radius_km AS volunteer_service_radius_km,
+          COALESCE(vp.animal_scopes, ARRAY[]::text[]) AS volunteer_animal_scopes,
           (
             SELECT count(*)::int
             FROM notification_events ne
@@ -913,7 +947,9 @@ async fn ranked_candidates(
           ) AS recent_60m
         FROM push_subscriptions ps
         JOIN users u ON u.id = ps.user_id
+        LEFT JOIN volunteer_profiles vp ON vp.user_id = ps.user_id
         WHERE u.deleted_at IS NULL
+          AND ps.invalidated_at IS NULL
           AND ps.updated_at > now() - ($1::int * interval '1 minute')
           AND ps.lat BETWEEN $2 AND $3
           AND ps.lng BETWEEN $4 AND $5
@@ -960,6 +996,23 @@ async fn ranked_candidates(
         let account_type: String = row.get("account_type");
         let trust_score: i16 = row.get("trust_score");
         let verified: bool = row.get("verified");
+        let volunteer_active: bool = row.get("volunteer_active");
+        let volunteer_verified: bool = row.get("volunteer_verified");
+        let volunteer_scopes: Vec<String> = row.get("volunteer_animal_scopes");
+        let volunteer_scope_match = volunteer_active
+            && (volunteer_scopes.iter().any(|scope| scope == "general")
+                || volunteer_scopes.iter().any(|scope| scopes.contains(scope)));
+        let volunteer_radius = row.get::<Option<f64>, _>("volunteer_service_radius_km");
+        if volunteer_scope_match && volunteer_radius.is_some_and(|radius| distance > radius) {
+            continue;
+        }
+        let volunteer_bonus = if volunteer_scope_match {
+            12.0 + if volunteer_verified { 8.0 } else { 0.0 }
+                + (row.get::<i64, _>("volunteer_responses_count") as f64).min(20.0) * 0.3
+                + (row.get::<i64, _>("volunteer_arrived_count") as f64).min(20.0) * 0.5
+        } else {
+            0.0
+        };
         let score = candidate_score(
             distance,
             phase.radius_km,
@@ -970,7 +1023,7 @@ async fn ranked_candidates(
             critical_alerts,
             recent_30m,
             recent_60m,
-        );
+        ) + volunteer_bonus;
 
         candidates.push(Candidate {
             user_id: row.get("user_id"),
@@ -1335,6 +1388,11 @@ fn animal_scopes_for_post(post: &Post) -> Vec<String> {
     match post.animal_type {
         AnimalType::Dog => scopes.push("dog".to_string()),
         AnimalType::Cat => scopes.push("cat".to_string()),
+        AnimalType::Bird => scopes.push("bird".to_string()),
+        AnimalType::Wildlife => scopes.push("wildlife".to_string()),
+        AnimalType::Reptile => scopes.push("reptile".to_string()),
+        AnimalType::Livestock => scopes.push("livestock".to_string()),
+        AnimalType::Marine => scopes.push("marine".to_string()),
         AnimalType::Other => scopes.push("other".to_string()),
     }
 
@@ -1562,6 +1620,11 @@ fn animal_type_from_str(value: &str) -> AnimalType {
     match value {
         "dog" => AnimalType::Dog,
         "cat" => AnimalType::Cat,
+        "bird" => AnimalType::Bird,
+        "wildlife" => AnimalType::Wildlife,
+        "reptile" => AnimalType::Reptile,
+        "livestock" => AnimalType::Livestock,
+        "marine" => AnimalType::Marine,
         _ => AnimalType::Other,
     }
 }
