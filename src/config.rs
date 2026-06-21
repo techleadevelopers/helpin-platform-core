@@ -18,6 +18,7 @@ pub struct Config {
     pub cloudinary_api_secret: Option<String>,
     pub geocoding_api_provider: Option<String>,
     pub google_maps_api_key: Option<String>,
+    #[allow(dead_code)]
     pub api_public_url: String,
     pub app_public_url: String,
     pub smtp_host: Option<String>,
