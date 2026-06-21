@@ -1,10 +1,10 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     Json,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -21,6 +21,28 @@ use crate::{
 };
 
 const PUBLIC_PROFILE_POST_LIMIT: usize = 60;
+
+#[derive(Deserialize)]
+pub struct PublicUserSearchQuery {
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserSummary {
+    pub id: String,
+    pub name: String,
+    pub avatar: Option<String>,
+    #[serde(rename = "type")]
+    pub account_type: AccountType,
+    pub verified: bool,
+}
+
+#[derive(Deserialize)]
+pub struct PublicUserRelationQuery {
+    pub limit: Option<i64>,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +73,47 @@ pub struct FollowUserResponse {
     pub followers_count: i64,
 }
 
+pub async fn list_public_users(
+    State(state): State<AppState>,
+    Query(query): Query<PublicUserSearchQuery>,
+) -> Result<Json<Vec<PublicUserSummary>>, ApiError> {
+    let term = query.q.unwrap_or_default().trim().to_lowercase();
+    let limit = query.limit.unwrap_or(20).clamp(1, 50);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          u.id,
+          u.name,
+          u.avatar_url,
+          u.account_type::text AS account_type,
+          u.verified,
+          op.verification_status
+        FROM users u
+        LEFT JOIN ong_profiles op ON op.user_id = u.id
+        WHERE u.deleted_at IS NULL
+          AND (
+            $1 = ''
+            OR lower(u.name) LIKE '%' || $1 || '%'
+            OR lower(COALESCE(u.city, '')) LIKE '%' || $1 || '%'
+            OR lower(COALESCE(u.neighborhood, '')) LIKE '%' || $1 || '%'
+          )
+        ORDER BY
+          CASE WHEN $1 = '' THEN u.created_at END DESC,
+          lower(u.name) ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(term)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+
+    let users = rows.into_iter().map(public_user_summary_from_row).collect();
+
+    Ok(Json(users))
+}
+
 pub async fn get_public_user_profile(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -62,6 +125,72 @@ pub async fn get_public_user_profile(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+pub async fn list_public_user_followers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<PublicUserRelationQuery>,
+) -> Result<Json<Vec<PublicUserSummary>>, ApiError> {
+    let user_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let users = list_user_relation_summaries(
+        &state,
+        r#"
+        SELECT
+          u.id,
+          u.name,
+          u.avatar_url,
+          u.account_type::text AS account_type,
+          u.verified,
+          op.verification_status
+        FROM user_follows uf
+        INNER JOIN users u ON u.id = uf.follower_id
+        LEFT JOIN ong_profiles op ON op.user_id = u.id
+        WHERE uf.followed_id = $1
+          AND uf.active = true
+          AND u.deleted_at IS NULL
+        ORDER BY uf.updated_at DESC
+        LIMIT $2
+        "#,
+        user_id,
+        limit,
+    )
+    .await?;
+    Ok(Json(users))
+}
+
+pub async fn list_public_user_following(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<PublicUserRelationQuery>,
+) -> Result<Json<Vec<PublicUserSummary>>, ApiError> {
+    let user_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let users = list_user_relation_summaries(
+        &state,
+        r#"
+        SELECT
+          u.id,
+          u.name,
+          u.avatar_url,
+          u.account_type::text AS account_type,
+          u.verified,
+          op.verification_status
+        FROM user_follows uf
+        INNER JOIN users u ON u.id = uf.followed_id
+        LEFT JOIN ong_profiles op ON op.user_id = u.id
+        WHERE uf.follower_id = $1
+          AND uf.active = true
+          AND u.deleted_at IS NULL
+        ORDER BY uf.updated_at DESC
+        LIMIT $2
+        "#,
+        user_id,
+        limit,
+    )
+    .await?;
+    Ok(Json(users))
 }
 
 pub async fn follow_user(
@@ -112,6 +241,39 @@ pub async fn follow_user(
         following,
         followers_count,
     }))
+}
+
+async fn list_user_relation_summaries(
+    state: &AppState,
+    sql: &str,
+    user_id: Uuid,
+    limit: i64,
+) -> Result<Vec<PublicUserSummary>, ApiError> {
+    let rows = sqlx::query(sql)
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?;
+
+    Ok(rows.into_iter().map(public_user_summary_from_row).collect())
+}
+
+fn public_user_summary_from_row(row: sqlx::postgres::PgRow) -> PublicUserSummary {
+    let account_type = auth_service::account_type_from_str(row.get::<&str, _>("account_type"));
+    let verified = if matches!(account_type, AccountType::Ong) {
+        row.get::<Option<String>, _>("verification_status")
+            .as_deref()
+            == Some("APPROVED")
+    } else {
+        row.get("verified")
+    };
+    PublicUserSummary {
+        id: row.get::<Uuid, _>("id").to_string(),
+        name: row.get("name"),
+        avatar: row.get("avatar_url"),
+        account_type,
+        verified,
+    }
 }
 
 async fn load_public_profile(
