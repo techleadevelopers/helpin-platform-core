@@ -208,18 +208,15 @@ impl Config {
         let geocoding_provider = self
             .geocoding_api_provider
             .as_deref()
-            .unwrap_or("google")
+            .unwrap_or("auto")
             .trim()
             .to_ascii_lowercase();
         anyhow::ensure!(
-            matches!(geocoding_provider.as_str(), "google" | "google_maps"),
-            "GEOCODING_API_PROVIDER must be google outside development"
-        );
-        anyhow::ensure!(
-            self.google_maps_api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            "GOOGLE_MAPS_API_KEY is required outside development"
+            matches!(
+                geocoding_provider.as_str(),
+                "auto" | "google" | "google_maps" | "osm" | "nominatim" | "openstreetmap"
+            ),
+            "GEOCODING_API_PROVIDER must be auto, google, or osm outside development"
         );
         if self.payments_enabled {
             anyhow::ensure!(
