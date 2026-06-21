@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, patch, post, put},
+    routing::{get, patch, post},
     Router,
 };
 
@@ -147,6 +147,15 @@ pub fn router(state: AppState) -> Router {
             get(posts::list_comments).post(posts::create_comment),
         )
         .route("/v1/posts/:id/report", post(posts::report_post))
+        .route("/v1/users", get(users::list_public_users))
+        .route(
+            "/v1/users/:id/followers",
+            get(users::list_public_user_followers),
+        )
+        .route(
+            "/v1/users/:id/following",
+            get(users::list_public_user_following),
+        )
         .route("/v1/users/:id", get(users::get_public_user_profile))
         .route("/v1/users/:id/follow", post(users::follow_user))
         .route(
