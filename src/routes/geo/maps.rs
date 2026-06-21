@@ -112,6 +112,13 @@ struct GoogleLocation {
     lng: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct NominatimResult {
+    display_name: Option<String>,
+    lat: String,
+    lon: String,
+}
+
 pub async fn static_map_url(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -166,16 +173,44 @@ pub async fn geocode_address(
     address: &str,
 ) -> Result<Option<GeocodeResponse>, ApiError> {
     let provider = configured_provider(state);
-    if !matches!(provider.as_str(), "google" | "google_maps") {
-        return Err(ApiError::Validation(format!(
-            "unsupported geocoding provider: {provider}"
-        )));
-    }
-    let api_key = google_maps_key(state)?;
     let sanitized = sanitize_address(address);
+    match provider.as_str() {
+        "google" | "google_maps" => return geocode_address_google(state, &sanitized).await,
+        "osm" | "nominatim" | "openstreetmap" => {
+            return geocode_address_nominatim(&sanitized).await;
+        }
+        "auto" => {
+            if state
+                .config
+                .google_maps_api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                match geocode_address_google(state, &sanitized).await {
+                    Ok(result) => return Ok(result),
+                    Err(error) => {
+                        tracing::warn!(?error, "google geocode failed; falling back to nominatim");
+                    }
+                }
+            }
+            return geocode_address_nominatim(&sanitized).await;
+        }
+        _ => {
+            return Err(ApiError::Validation(format!(
+                "unsupported geocoding provider: {provider}"
+            )));
+        }
+    }
+}
+
+async fn geocode_address_google(
+    state: &AppState,
+    sanitized: &str,
+) -> Result<Option<GeocodeResponse>, ApiError> {
+    let api_key = google_maps_key(state)?;
     let url = format!(
         "https://maps.googleapis.com/maps/api/geocode/json?address={}&region=br&language=pt-BR&key={}",
-        url_component(&sanitized),
+        url_component(sanitized),
         url_component(api_key),
     );
     let payload = reqwest::get(url)
@@ -207,6 +242,57 @@ pub async fn geocode_address(
     Ok(payload
         .results
         .and_then(|mut results| results.drain(..).find_map(geocode_response_from_result)))
+}
+
+async fn geocode_address_nominatim(address: &str) -> Result<Option<GeocodeResponse>, ApiError> {
+    let query =
+        if address.to_lowercase().contains("brasil") || address.to_lowercase().contains("brazil") {
+            address.to_string()
+        } else {
+            format!("{address}, Brasil")
+        };
+    let url = format!(
+        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1&countrycodes=br&addressdetails=1",
+        url_component(&query),
+    );
+    let client = reqwest::Client::new();
+    let payload = client
+        .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            "ZooHelp/1.0 geocoding fallback (contact: helpin)",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "pt-BR,pt;q=0.9")
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "nominatim geocode request failed");
+            ApiError::ServiceUnavailable
+        })?
+        .json::<Vec<NominatimResult>>()
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "nominatim geocode response parse failed");
+            ApiError::ServiceUnavailable
+        })?;
+
+    let Some(result) = payload.into_iter().next() else {
+        return Ok(None);
+    };
+    let latitude = result.lat.parse::<f64>().map_err(|error| {
+        tracing::warn!(?error, "nominatim latitude parse failed");
+        ApiError::ServiceUnavailable
+    })?;
+    let longitude = result.lon.parse::<f64>().map_err(|error| {
+        tracing::warn!(?error, "nominatim longitude parse failed");
+        ApiError::ServiceUnavailable
+    })?;
+
+    Ok(Some(GeocodeResponse {
+        label: result.display_name.unwrap_or_else(|| address.to_string()),
+        latitude,
+        longitude,
+    }))
 }
 
 pub async fn place_autocomplete(
