@@ -13,6 +13,15 @@ pub fn spawn(state: AppState) {
         return;
     }
 
+    tracing::info!(
+        provider = state
+            .config
+            .geocoding_api_provider
+            .as_deref()
+            .unwrap_or("google"),
+        "post geocoding worker started"
+    );
+
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
@@ -43,6 +52,12 @@ async fn process_due_jobs(state: &AppState) -> Result<(), sqlx::Error> {
         let post_id: Uuid = job.get("post_id");
         let address_label: String = job.get("address_label");
         let attempts: i32 = job.get("attempts");
+        tracing::info!(
+            %post_id,
+            attempts,
+            address = %address_label,
+            "post geocoding job picked"
+        );
         sqlx::query(
             "UPDATE post_geocode_jobs SET status = 'processing', attempts = attempts + 1, updated_at = now() WHERE post_id = $1",
         )
@@ -52,6 +67,13 @@ async fn process_due_jobs(state: &AppState) -> Result<(), sqlx::Error> {
 
         match maps::geocode_address(state, &address_label).await {
             Ok(Some(result)) => {
+                tracing::info!(
+                    %post_id,
+                    latitude = result.latitude,
+                    longitude = result.longitude,
+                    label = %result.label,
+                    "manual post address geocoded"
+                );
                 resolve_post(state, post_id, result.latitude, result.longitude).await?
             }
             Ok(None) => fail_or_retry(state, post_id, attempts + 1, "address not found").await?,
@@ -108,7 +130,18 @@ async fn resolve_post(
         .bind(post_id)
         .execute(&state.db)
         .await?;
-        rescue_fanout::create_fanout_state_for_post(&state.db, post_id, None).await?;
+        let fanout_state_id =
+            rescue_fanout::create_fanout_state_for_post(&state.db, post_id, None).await?;
+        tracing::info!(
+            %post_id,
+            %fanout_state_id,
+            "manual address post activated rescue fanout after geocode"
+        );
+    } else {
+        tracing::info!(
+            %post_id,
+            "manual address post geocoded without rescue fanout requirement"
+        );
     }
     Ok(())
 }
@@ -120,6 +153,12 @@ async fn fail_or_retry(
     message: &str,
 ) -> Result<(), sqlx::Error> {
     if attempts >= MAX_ATTEMPTS {
+        tracing::warn!(
+            %post_id,
+            attempts,
+            error = %message,
+            "post geocoding job failed permanently"
+        );
         sqlx::query(
             "UPDATE post_geocode_jobs SET status = 'failed', last_error = $2, updated_at = now() WHERE post_id = $1",
         )
@@ -132,6 +171,14 @@ async fn fail_or_retry(
             .execute(&state.db)
             .await?;
     } else {
+        let delay_seconds = 5_i32.pow(attempts as u32);
+        tracing::warn!(
+            %post_id,
+            attempts,
+            delay_seconds,
+            error = %message,
+            "post geocoding job scheduled for retry"
+        );
         sqlx::query(
             r#"
             UPDATE post_geocode_jobs
@@ -143,7 +190,7 @@ async fn fail_or_retry(
         )
         .bind(post_id)
         .bind(message)
-        .bind(5_i32.pow(attempts as u32))
+        .bind(delay_seconds)
         .execute(&state.db)
         .await?;
     }
