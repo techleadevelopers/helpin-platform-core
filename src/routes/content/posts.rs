@@ -601,6 +601,11 @@ pub async fn create_post(
         .bind(&location)
         .execute(&mut *tx)
         .await?;
+        tracing::info!(
+            %post_id,
+            address = %location,
+            "manual post address queued for background geocoding"
+        );
     }
 
     let mut stored_media = Vec::with_capacity(media.len());
