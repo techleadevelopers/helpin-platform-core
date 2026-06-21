@@ -120,13 +120,7 @@ pub async fn static_map_url(
         .map_err(|error| ApiError::Validation(error.to_string()))?;
 
     authorize_maps_request(&state, &headers, "static").await?;
-    let provider = state
-        .config
-        .geocoding_api_provider
-        .as_deref()
-        .unwrap_or("google")
-        .trim()
-        .to_ascii_lowercase();
+    let provider = configured_provider(&state);
     if provider != "google" && provider != "google_maps" {
         return Ok(Json(StaticMapResponse {
             provider,
@@ -169,6 +163,12 @@ pub async fn geocode_address(
     state: &AppState,
     address: &str,
 ) -> Result<Option<GeocodeResponse>, ApiError> {
+    let provider = configured_provider(state);
+    if !matches!(provider.as_str(), "google" | "google_maps") {
+        return Err(ApiError::Validation(format!(
+            "unsupported geocoding provider: {provider}"
+        )));
+    }
     let api_key = google_maps_key(state)?;
     let sanitized = sanitize_address(address);
     let url = format!(
@@ -292,6 +292,16 @@ fn google_maps_key(state: &AppState) -> Result<&str, ApiError> {
         .filter(|value| !value.trim().is_empty())
         .map(String::as_str)
         .ok_or_else(|| ApiError::Validation("GOOGLE_MAPS_API_KEY is required".into()))
+}
+
+fn configured_provider(state: &AppState) -> String {
+    state
+        .config
+        .geocoding_api_provider
+        .as_deref()
+        .unwrap_or("google")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn geocode_response_from_result(result: GooglePlaceResult) -> Option<GeocodeResponse> {
