@@ -23,6 +23,10 @@ const MAX_SPECIALIST_CANDIDATES_PER_ATTEMPT: usize = 80;
 const MAX_RECENT_RESCUE_ALERTS_30M: i32 = 3;
 const MAX_RECENT_RESCUE_ALERTS_60M: i32 = 6;
 const EARTH_KM_PER_DEGREE: f64 = 111.0;
+const SOFT_FANOUT_AFTER_MINUTES: i64 = 60;
+const MAX_FANOUT_LIFETIME_HOURS: i64 = 6;
+const SOFT_FANOUT_INTERVAL_SECONDS: i64 = 3600;
+const SOFT_FANOUT_PHASE: i32 = 10;
 
 #[derive(Clone, Copy, Debug)]
 struct FanoutPhase {
@@ -100,6 +104,13 @@ const ESCALATION_PHASES: [EscalationPhase; 4] = [
     },
 ];
 
+const SOFT_FANOUT: FanoutPhase = FanoutPhase {
+    phase: SOFT_FANOUT_PHASE,
+    radius_km: 10.0,
+    next_delay_seconds: SOFT_FANOUT_INTERVAL_SECONDS,
+    verified_escalation: false,
+};
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RescueResponseRecord {
@@ -118,6 +129,7 @@ struct FanoutState {
     id: Uuid,
     post_id: Uuid,
     current_phase: i32,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug)]
@@ -357,7 +369,7 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
     let mut tx = db.begin().await?;
     let row = sqlx::query(
         r#"
-        SELECT id, post_id, rescue_session_id, current_phase
+        SELECT id, post_id, rescue_session_id, current_phase, created_at
         FROM rescue_fanout_states
         WHERE id = $1
           AND status = 'active'
@@ -378,6 +390,7 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
         id: row.get("id"),
         post_id: row.get("post_id"),
         current_phase: row.get("current_phase"),
+        created_at: row.get("created_at"),
     };
 
     let post_status: Option<String> =
@@ -431,6 +444,12 @@ async fn process_one_fanout(db: &PgPool, state_id: Uuid) -> Result<(), sqlx::Err
 
     if let Some(phase) = escalation_phase_for(state.current_phase) {
         process_escalation_phase(&mut tx, &state, &post, phase).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    if state.current_phase == SOFT_FANOUT_PHASE {
+        process_soft_fanout_phase(&mut tx, &state, &post).await?;
         tx.commit().await?;
         return Ok(());
     }
@@ -591,24 +610,106 @@ async fn process_escalation_phase(
         .execute(&mut **tx)
         .await?;
     } else {
+        let delay_seconds = seconds_until_soft_fanout(state.created_at);
         sqlx::query(
             r#"
             UPDATE rescue_fanout_states
             SET current_phase = $2,
-                status = 'exhausted',
+                status = 'active',
                 last_radius_km = $3,
+                next_run_at = now() + ($4::text || ' seconds')::interval,
                 attempts = attempts + 1,
-                updated_at = now(),
-                completed_at = now()
+                updated_at = now()
             WHERE id = $1
             "#,
         )
         .bind(state.id)
-        .bind(phase.phase)
+        .bind(SOFT_FANOUT_PHASE)
         .bind(phase.radius_km)
+        .bind(delay_seconds)
         .execute(&mut **tx)
         .await?;
+        tracing::info!(
+            fanout_state_id = %state.id,
+            post_id = %state.post_id,
+            delay_seconds,
+            "rescue fanout entering softened hourly mode"
+        );
     }
+
+    Ok(())
+}
+
+async fn process_soft_fanout_phase(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &FanoutState,
+    post: &Post,
+) -> Result<(), sqlx::Error> {
+    let age_hours = Utc::now()
+        .signed_duration_since(state.created_at)
+        .num_hours();
+    if age_hours >= MAX_FANOUT_LIFETIME_HOURS {
+        tracing::info!(
+            fanout_state_id = %state.id,
+            post_id = %state.post_id,
+            age_hours,
+            "rescue fanout exhausted after softened mode lifetime"
+        );
+        complete_state(tx, state.id, "exhausted").await?;
+        return Ok(());
+    }
+
+    let phase = SOFT_FANOUT;
+    let candidates = ranked_candidates(tx, post, phase).await?;
+    let candidate_count = candidates.len() as i32;
+    let alert = alert_for_candidates(post, phase, candidates)?;
+    let recipient_count = alert.recipients.len() as i32;
+    persist_rescue_alert_tx(tx, &alert).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO rescue_fanout_attempts (
+          id, fanout_state_id, post_id, phase, radius_km, candidate_count,
+          push_jobs_created, confirmed_count_at_run, reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 'softened_hourly_refresh')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(state.id)
+    .bind(state.post_id)
+    .bind(phase.phase)
+    .bind(phase.radius_km)
+    .bind(candidate_count)
+    .bind(recipient_count)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE rescue_fanout_states
+        SET current_phase = $2,
+            last_radius_km = $3,
+            next_run_at = now() + ($4::text || ' seconds')::interval,
+            attempts = attempts + 1,
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(state.id)
+    .bind(SOFT_FANOUT_PHASE)
+    .bind(phase.radius_km)
+    .bind(SOFT_FANOUT_INTERVAL_SECONDS)
+    .execute(&mut **tx)
+    .await?;
+
+    tracing::info!(
+        fanout_state_id = %state.id,
+        post_id = %state.post_id,
+        candidate_count,
+        recipient_count,
+        "softened rescue fanout cycle completed"
+    );
 
     Ok(())
 }
@@ -1585,6 +1686,19 @@ fn escalation_phase_for(current_phase: i32) -> Option<EscalationPhase> {
         .iter()
         .copied()
         .find(|phase| phase.phase == current_phase)
+}
+
+fn seconds_until_soft_fanout(created_at: DateTime<Utc>) -> i64 {
+    let elapsed = Utc::now()
+        .signed_duration_since(created_at)
+        .num_seconds()
+        .max(0);
+    let soft_after = SOFT_FANOUT_AFTER_MINUTES * 60;
+    if elapsed >= soft_after {
+        SOFT_FANOUT_INTERVAL_SECONDS
+    } else {
+        (soft_after - elapsed).max(60)
+    }
 }
 
 fn longitude_delta_for_radius(lat: f64, radius_km: f64) -> f64 {
