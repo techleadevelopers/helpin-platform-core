@@ -265,11 +265,9 @@ pub async fn register(
     validate_ong_payload(&payload, &account_type)?;
 
     match insert_user_with_optional_ong(&state, &payload, &account_type, &password_hash).await {
-        Ok((record, ong_profile)) => {
-            issue_auth_response(&state, record, ong_profile)
-                .await
-                .map(Json)
-        }
+        Ok((record, ong_profile)) => issue_auth_response(&state, record, ong_profile)
+            .await
+            .map(Json),
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
             Err(ApiError::Conflict("email already registered".into()))
         }
