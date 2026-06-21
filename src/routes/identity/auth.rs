@@ -266,7 +266,6 @@ pub async fn register(
 
     match insert_user_with_optional_ong(&state, &payload, &account_type, &password_hash).await {
         Ok((record, ong_profile)) => {
-            queue_email_verification(&state, &record).await;
             issue_auth_response(&state, record, ong_profile)
                 .await
                 .map(Json)
@@ -289,14 +288,6 @@ pub async fn register(
                 normalize_gender(payload.gender.as_deref()),
                 fallback_ong_record(&payload, &account_type),
             )?;
-            let token = new_action_token();
-            if let Err(error) = state
-                .email
-                .send_email_verification(&payload.email, &payload.name, &token)
-                .await
-            {
-                tracing::warn!(?error, "fallback email verification send failed");
-            }
             Ok(Json(response))
         }
         Err(error) => {
@@ -730,10 +721,10 @@ async fn insert_user_with_optional_ong(
     let row = sqlx::query(
         r#"
         INSERT INTO users (
-          id, name, email, avatar_url, password_hash, account_type, gender,
+          id, name, email, avatar_url, password_hash, account_type, verified, gender,
           cep, street, number, complement, neighborhood, city, state
         )
-        VALUES ($1, $2, $3, $4, $5, $6::account_type, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6::account_type, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING id, name, email, avatar_url, password_hash, account_type::text AS account_type, verified, gender,
                   cep, street, number, complement, neighborhood, city, state
         "#,
@@ -744,6 +735,7 @@ async fn insert_user_with_optional_ong(
     .bind(payload.avatar.as_deref())
     .bind(password_hash)
     .bind(account_type_str)
+    .bind(matches!(account_type, AccountType::Person | AccountType::Vet | AccountType::Admin))
     .bind(normalize_gender(payload.gender.as_deref()))
     .bind(payload.cep.as_deref())
     .bind(payload.street.as_deref())
@@ -865,35 +857,6 @@ fn row_to_user_record(row: sqlx::postgres::PgRow) -> UserRecord {
         neighborhood: row.get("neighborhood"),
         city: row.get("city"),
         state: row.get("state"),
-    }
-}
-
-async fn queue_email_verification(state: &AppState, record: &UserRecord) {
-    let token = new_action_token();
-    let expires_at = Utc::now() + Duration::hours(24);
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO email_verification_tokens (token, user_id, expires_at)
-        VALUES ($1, $2, $3)
-        "#,
-    )
-    .bind(&token)
-    .bind(record.id)
-    .bind(expires_at)
-    .execute(&state.db)
-    .await;
-
-    if let Err(error) = inserted {
-        tracing::warn!(?error, user_id = %record.id, "email verification token was not persisted");
-        return;
-    }
-
-    if let Err(error) = state
-        .email
-        .send_email_verification(&record.email, &record.name, &token)
-        .await
-    {
-        tracing::warn!(?error, user_id = %record.id, "email verification send failed");
     }
 }
 
