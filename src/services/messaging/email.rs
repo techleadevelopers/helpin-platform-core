@@ -43,28 +43,6 @@ impl EmailService {
         tokio::task::spawn_blocking(move || send_blocking(&config, email)).await?
     }
 
-    pub async fn send_email_verification(
-        &self,
-        to_email: &str,
-        to_name: &str,
-        token: &str,
-    ) -> anyhow::Result<()> {
-        let verify_url = format!(
-            "{}/v1/auth/email/verify?token={}",
-            self.config.api_public_url.trim_end_matches('/'),
-            token
-        );
-        self.send(OutboundEmail {
-            to_email: to_email.to_string(),
-            to_name: Some(to_name.to_string()),
-            subject: "Confirme seu e-mail no Helpin".to_string(),
-            text_body: format!(
-                "Ola, {to_name}!\n\nConfirme seu e-mail para ativar sua conta no Helpin:\n{verify_url}\n\nSe voce nao criou essa conta, ignore esta mensagem."
-            ),
-        })
-        .await
-    }
-
     pub async fn send_password_reset(&self, to_email: &str, token: &str) -> anyhow::Result<()> {
         let reset_url = format!(
             "{}/reset-password?token={}",
