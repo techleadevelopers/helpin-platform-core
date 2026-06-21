@@ -205,6 +205,22 @@ impl Config {
             self.rescue_fanout_worker_enabled,
             "RESCUE_FANOUT_WORKER_ENABLED=true is required outside development"
         );
+        let geocoding_provider = self
+            .geocoding_api_provider
+            .as_deref()
+            .unwrap_or("google")
+            .trim()
+            .to_ascii_lowercase();
+        anyhow::ensure!(
+            matches!(geocoding_provider.as_str(), "google" | "google_maps"),
+            "GEOCODING_API_PROVIDER must be google outside development"
+        );
+        anyhow::ensure!(
+            self.google_maps_api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "GOOGLE_MAPS_API_KEY is required outside development"
+        );
         if self.payments_enabled {
             anyhow::ensure!(
                 self.payment_provider != "disabled"
