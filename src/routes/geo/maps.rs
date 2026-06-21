@@ -86,6 +86,8 @@ struct GooglePrediction {
 #[derive(Debug, Deserialize)]
 struct GoogleGeocodeResponse {
     results: Option<Vec<GooglePlaceResult>>,
+    status: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +190,19 @@ pub async fn geocode_address(
             tracing::warn!(?error, "google geocode response parse failed");
             ApiError::ServiceUnavailable
         })?;
+
+    match payload.status.as_deref().unwrap_or("OK") {
+        "OK" => {}
+        "ZERO_RESULTS" => return Ok(None),
+        status => {
+            tracing::warn!(
+                google_status = %status,
+                error_message = payload.error_message.as_deref().unwrap_or(""),
+                "google geocode request denied or failed"
+            );
+            return Err(ApiError::ServiceUnavailable);
+        }
+    }
 
     Ok(payload
         .results
