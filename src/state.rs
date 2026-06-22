@@ -42,14 +42,20 @@ impl AppState {
         let (feed_tx, _) = broadcast::channel(4096);
         let email = EmailService::new(config.clone());
         let event_bus = EventBus::connect(&config).await?;
-        event_bus.spawn_bridge(chat_channels.clone(), rescue_tx.clone(), feed_tx.clone());
+        if config.process_role.starts_realtime_bridge() {
+            event_bus.spawn_bridge(chat_channels.clone(), rescue_tx.clone(), feed_tx.clone());
+        }
         let redis = if config.app_env == "test" {
             None
         } else {
             Some(redis::Client::open(config.redis_url.as_str())?)
         };
-        crate::services::push_worker::spawn(config.clone(), db.clone());
-        crate::services::rescue_fanout::spawn(config.rescue_fanout_worker_enabled, db.clone());
+        if config.process_role.starts_push_worker() {
+            crate::services::push_worker::spawn(config.clone(), db.clone());
+        }
+        if config.process_role.starts_fanout_worker() {
+            crate::services::rescue_fanout::spawn(config.rescue_fanout_worker_enabled, db.clone());
+        }
 
         let state = Self {
             config,
@@ -63,7 +69,9 @@ impl AppState {
             redis,
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         };
-        crate::services::geocoding_worker::spawn(state.clone());
+        if state.config.process_role.starts_geocode_worker() {
+            crate::services::geocoding_worker::spawn(state.clone());
+        }
         Ok(state)
     }
 }
