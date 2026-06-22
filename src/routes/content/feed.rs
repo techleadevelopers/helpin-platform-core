@@ -38,6 +38,8 @@ pub struct FeedQuery {
     pub limit: Option<usize>,
     pub before: Option<DateTime<Utc>>,
     pub liked: Option<bool>,
+    #[serde(skip)]
+    pub author_id: Option<Uuid>,
 }
 
 pub async fn list_feed(
@@ -164,6 +166,7 @@ pub(crate) async fn load_db_posts(
           AND ($2::account_type IS NULL OR u.account_type = $2::account_type)
           AND ($3::boolean IS NULL OR p.urgent = $3)
           AND ($4::timestamptz IS NULL OR p.created_at < $4)
+          AND ($11::uuid IS NULL OR p.author_id = $11)
           AND (
             $5::double precision IS NULL
             OR $6::double precision IS NULL
@@ -252,6 +255,7 @@ pub(crate) async fn load_db_posts(
           AND ($2::account_type IS NULL OR u.account_type = $2::account_type)
           AND ($3::boolean IS NULL OR p.urgent = $3)
           AND ($4::timestamptz IS NULL OR p.created_at < $4)
+          AND ($11::uuid IS NULL OR p.author_id = $11)
           AND (
             $5::double precision IS NULL
             OR $6::double precision IS NULL
@@ -305,6 +309,7 @@ pub(crate) async fn load_db_posts(
         .bind(viewer_id)
         .bind(query.liked)
         .bind(limit)
+        .bind(query.author_id)
         .fetch_all(&state.db)
         .await?;
 
@@ -498,6 +503,7 @@ mod tests {
                 limit: Some(10),
                 before: None,
                 liked: None,
+                author_id: None,
             },
             seed_posts(),
         );
@@ -518,6 +524,7 @@ mod tests {
                 limit: Some(100),
                 before: None,
                 liked: None,
+                author_id: None,
             },
             seed_posts(),
         );
