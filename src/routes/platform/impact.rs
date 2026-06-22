@@ -18,9 +18,14 @@ pub struct ImpactMetrics {
     pub resolved_cases: i64,
     pub animals_helped: i64,
     pub confirmed_help_cases: i64,
+    pub supported_ongs: i64,
+    pub ong_support_cents: i64,
     pub active_protectors_30d: i64,
     pub active_verified_ongs: i64,
     pub repeat_helpers: i64,
+    pub first_help_response_seconds: Option<i64>,
+    pub first_animal_resolved_seconds: Option<i64>,
+    pub first_ong_support_seconds: Option<i64>,
     pub median_first_nearby_signal_seconds: Option<i64>,
     pub median_first_response_seconds: Option<i64>,
     pub median_geocode_activation_seconds: Option<i64>,
@@ -66,6 +71,30 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
     )
     .await?;
 
+    let supported_ongs = scalar_i64(
+        db,
+        r#"
+        SELECT count(DISTINCT ong_id)
+        FROM donations
+        WHERE ong_id IS NOT NULL
+          AND purpose = 'ong_donation'
+          AND status = 'paid'
+        "#,
+    )
+    .await?;
+
+    let ong_support_cents = scalar_i64(
+        db,
+        r#"
+        SELECT COALESCE(sum(amount_cents), 0)::bigint
+        FROM donations
+        WHERE ong_id IS NOT NULL
+          AND purpose = 'ong_donation'
+          AND status = 'paid'
+        "#,
+    )
+    .await?;
+
     let active_protectors_30d = scalar_i64(
         db,
         r#"
@@ -104,6 +133,69 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
           GROUP BY user_id
           HAVING count(DISTINCT post_id) >= 2
         ) helpers
+        "#,
+    )
+    .await?;
+
+    let first_help_response_seconds = scalar_seconds(
+        db,
+        r#"
+        SELECT min(seconds)
+        FROM (
+          SELECT EXTRACT(EPOCH FROM (min(rr.created_at) - p.created_at))::double precision AS seconds
+          FROM posts p
+          JOIN rescue_responses rr ON rr.post_id = p.id
+          WHERE rr.status IN ('confirmed', 'arrived')
+          GROUP BY p.id, p.created_at
+        ) first_help
+        WHERE seconds >= 0
+        "#,
+    )
+    .await?;
+
+    let first_animal_resolved_seconds = scalar_seconds(
+        db,
+        r#"
+        SELECT min(seconds)
+        FROM (
+          SELECT EXTRACT(EPOCH FROM (
+            COALESCE(
+              rfr.approved_at,
+              rfr.updated_at,
+              rfr.created_at,
+              p.resolved_at
+            ) - p.created_at
+          ))::double precision AS seconds
+          FROM posts p
+          LEFT JOIN rescue_final_reports rfr ON rfr.post_id = p.id
+            AND rfr.publication_status = 'published'
+            AND rfr.status IN ('rescued', 'referred')
+          WHERE p.rescue_status = 'resolved'
+             OR p.resolved_at IS NOT NULL
+             OR rfr.id IS NOT NULL
+        ) resolved
+        WHERE seconds >= 0
+        "#,
+    )
+    .await?;
+
+    let first_ong_support_seconds = scalar_seconds(
+        db,
+        r#"
+        WITH baseline AS (
+          SELECT min(created_at) AS created_at FROM posts
+        ),
+        first_support AS (
+          SELECT min(created_at) AS created_at
+          FROM donations
+          WHERE ong_id IS NOT NULL
+            AND purpose = 'ong_donation'
+            AND status = 'paid'
+        )
+        SELECT EXTRACT(EPOCH FROM (first_support.created_at - baseline.created_at))::double precision
+        FROM baseline, first_support
+        WHERE baseline.created_at IS NOT NULL
+          AND first_support.created_at IS NOT NULL
         "#,
     )
     .await?;
@@ -162,9 +254,14 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
         resolved_cases,
         animals_helped,
         confirmed_help_cases,
+        supported_ongs,
+        ong_support_cents,
         active_protectors_30d,
         active_verified_ongs,
         repeat_helpers,
+        first_help_response_seconds,
+        first_animal_resolved_seconds,
+        first_ong_support_seconds,
         median_first_nearby_signal_seconds,
         median_first_response_seconds,
         median_geocode_activation_seconds,
