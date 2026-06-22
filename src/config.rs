@@ -90,6 +90,7 @@ pub struct Config {
     pub rescue_fanout_worker_enabled: bool,
     pub push_provider: String,
     pub expo_access_token: Option<String>,
+    pub log_push_tokens: bool,
     pub throttle_ttl_seconds: u64,
     pub throttle_limit: usize,
 }
@@ -199,6 +200,7 @@ impl Config {
             expo_access_token: env::var("EXPO_ACCESS_TOKEN")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            log_push_tokens: env_bool("LOG_PUSH_TOKENS").unwrap_or(false),
             throttle_ttl_seconds: env::var("THROTTLE_TTL")
                 .ok()
                 .and_then(|value| value.parse().ok())
