@@ -103,12 +103,12 @@ impl NotificationEngine {
             .expect("seed rescue posts must have confirmed coordinates");
         let recipients = self.nearby_recipients(lat, lng, radius_km, post.urgent);
         let title = if post.urgent {
-            "Resgate urgente perto de voce".to_string()
+            "Resgate urgente perto de você".to_string()
         } else {
-            "Animal precisa de ajuda perto de voce".to_string()
+            "Animal precisa de ajuda perto de você".to_string()
         };
         let body = format!(
-            "{} em {}. Toque para ir ao local ou apoiar pelo chat.",
+            "{} em {}. Toque para confirmar ajuda, abrir rota ou coordenar pelo chat.",
             post.name, post.neighborhood
         );
         let alert = RescueAlert {
@@ -266,12 +266,12 @@ async fn build_persistent_rescue_alert(
     })?;
     let radius_km = alert_radius_km(post.urgent, default_radius_km);
     let title = if post.urgent {
-        "Resgate urgente perto de voce".to_string()
+        "Resgate urgente perto de você".to_string()
     } else {
-        "Animal precisa de ajuda perto de voce".to_string()
+        "Animal precisa de ajuda perto de você".to_string()
     };
     let body = format!(
-        "{} em {}. Toque para ir ao local ou apoiar pelo chat.",
+        "{} em {}. Toque para confirmar ajuda, abrir rota ou coordenar pelo chat.",
         post.name, post.neighborhood
     );
 
