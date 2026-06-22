@@ -13,7 +13,7 @@ use crate::{domain::Post, services::geo::haversine_km};
 #[cfg(test)]
 const MAX_RECENT_ALERTS: usize = 200;
 const EARTH_KM_PER_DEGREE: f64 = 111.0;
-const ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES: i64 = 15;
+const ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES: i64 = 24 * 60;
 const MAX_RESCUE_ALERT_RECIPIENTS: usize = 250;
 pub const MIN_RESCUE_ALERT_RADIUS_KM: f64 = 0.03;
 pub const URGENT_RESCUE_ALERT_RADIUS_KM: f64 = 0.03;
@@ -282,6 +282,7 @@ async fn build_persistent_rescue_alert(
         SELECT user_id, push_token, platform, lat, lng, radius_km, critical_alerts
         FROM push_subscriptions
         WHERE updated_at > now() - ($1::int * interval '1 minute')
+          AND invalidated_at IS NULL
           AND lat BETWEEN $2 AND $3
           AND lng BETWEEN $4 AND $5
           AND ($6::boolean = false OR critical_alerts = true)
