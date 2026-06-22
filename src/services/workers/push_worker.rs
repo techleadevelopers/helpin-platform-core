@@ -12,6 +12,7 @@ const MAX_ATTEMPTS: i32 = 5;
 const BATCH_SIZE: i64 = 50;
 const DELIVERY_CONCURRENCY: usize = 10;
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
+const EXPO_RECEIPTS_URL: &str = "https://exp.host/--/api/v2/push/getReceipts";
 
 #[derive(Debug)]
 struct PushJob {
@@ -26,6 +27,12 @@ struct PushDeliveryResult {
     provider_ticket_id: Option<String>,
 }
 
+#[derive(Debug)]
+struct PushReceiptJob {
+    id: Uuid,
+    provider_ticket_id: String,
+}
+
 pub fn spawn(config: Config, db: PgPool) {
     if !config.push_worker_enabled {
         return;
@@ -38,6 +45,9 @@ pub fn spawn(config: Config, db: PgPool) {
             interval.tick().await;
             if let Err(error) = process_batch(&config, &db, &client).await {
                 tracing::warn!(?error, "push worker batch failed");
+            }
+            if let Err(error) = process_receipts(&config, &db, &client).await {
+                tracing::warn!(?error, "push receipt batch failed");
             }
         }
     });
@@ -100,12 +110,12 @@ async fn deliver_or_defer(
                 sqlx::query(
                     r#"
                     UPDATE push_delivery_jobs
-                    SET status = 'sent',
+                    SET status = 'provider_accepted',
                         updated_at = now(),
                         last_error = NULL,
                         provider_response = $2,
                         provider_ticket_id = $3,
-                        delivered_at = now()
+                        provider_accepted_at = now()
                     WHERE id = $1
                     "#,
                 )
@@ -137,6 +147,159 @@ async fn deliver_or_defer(
         ),
     )
     .await
+}
+
+async fn process_receipts(config: &Config, db: &PgPool, client: &Client) -> anyhow::Result<()> {
+    if !matches!(config.push_provider.as_str(), "expo") {
+        return Ok(());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, provider_ticket_id
+        FROM push_delivery_jobs
+        WHERE status = 'provider_accepted'
+          AND provider_ticket_id IS NOT NULL
+          AND provider_accepted_at <= now() - interval '15 seconds'
+          AND (
+            receipt_checked_at IS NULL
+            OR receipt_checked_at <= now() - interval '60 seconds'
+          )
+        ORDER BY provider_accepted_at ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(BATCH_SIZE)
+    .fetch_all(db)
+    .await?;
+
+    let jobs: Vec<_> = rows
+        .into_iter()
+        .filter_map(|row| {
+            row.get::<Option<String>, _>("provider_ticket_id")
+                .map(|provider_ticket_id| PushReceiptJob {
+                    id: row.get("id"),
+                    provider_ticket_id,
+                })
+        })
+        .collect();
+
+    for chunk in jobs.chunks(100) {
+        check_receipt_chunk(config, db, client, chunk).await?;
+    }
+
+    Ok(())
+}
+
+async fn check_receipt_chunk(
+    config: &Config,
+    db: &PgPool,
+    client: &Client,
+    jobs: &[PushReceiptJob],
+) -> anyhow::Result<()> {
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    let ids: Vec<&str> = jobs
+        .iter()
+        .map(|job| job.provider_ticket_id.as_str())
+        .collect();
+    let mut request = client.post(EXPO_RECEIPTS_URL).json(&json!({ "ids": ids }));
+    if let Some(token) = config.expo_access_token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or_else(|_| Value::Null);
+    if !status.is_success() {
+        anyhow::bail!("expo receipts returned HTTP {status}: {body}");
+    }
+
+    let data = body.get("data").and_then(Value::as_object);
+    for job in jobs {
+        let receipt = data
+            .and_then(|data| data.get(&job.provider_ticket_id))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if receipt.is_null() {
+            sqlx::query(
+                r#"
+                UPDATE push_delivery_jobs
+                SET receipt_checked_at = now(),
+                    receipt_response = $2,
+                    updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(job.id)
+            .bind(receipt)
+            .execute(db)
+            .await?;
+            continue;
+        }
+
+        let receipt_status = receipt
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if receipt_status == "ok" {
+            sqlx::query(
+                r#"
+                UPDATE push_delivery_jobs
+                SET status = 'delivered',
+                    receipt_status = $2,
+                    receipt_checked_at = now(),
+                    receipt_response = $3,
+                    delivered_at = now(),
+                    updated_at = now(),
+                    last_error = NULL
+                WHERE id = $1
+                "#,
+            )
+            .bind(job.id)
+            .bind(receipt_status)
+            .bind(receipt)
+            .execute(db)
+            .await?;
+        } else {
+            let message = expo_receipt_error(&receipt);
+            sqlx::query(
+                r#"
+                UPDATE push_delivery_jobs
+                SET status = 'failed',
+                    receipt_status = $2,
+                    receipt_checked_at = now(),
+                    receipt_response = $3,
+                    last_error = $4,
+                    next_attempt_at = now() + interval '2 minutes',
+                    updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(job.id)
+            .bind(receipt_status)
+            .bind(receipt)
+            .bind(&message)
+            .execute(db)
+            .await?;
+
+            if is_invalid_token_error(&message) {
+                if let Some(push_token) = sqlx::query_scalar::<_, String>(
+                    "SELECT push_token FROM push_delivery_jobs WHERE id = $1",
+                )
+                .bind(job.id)
+                .fetch_optional(db)
+                .await?
+                {
+                    invalidate_push_token(db, &push_token, &message).await?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn send_expo_push(
@@ -218,6 +381,15 @@ fn expo_response_error(body: &Value) -> Option<String> {
         .unwrap_or("expo push rejected delivery");
     let details = data.get("details").cloned().unwrap_or(Value::Null);
     Some(format!("{message}: {details}"))
+}
+
+fn expo_receipt_error(receipt: &Value) -> String {
+    let message = receipt
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("expo receipt rejected delivery");
+    let details = receipt.get("details").cloned().unwrap_or(Value::Null);
+    format!("{message}: {details}")
 }
 
 fn is_invalid_token_error(message: &str) -> bool {
