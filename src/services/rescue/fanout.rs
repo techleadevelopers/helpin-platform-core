@@ -758,9 +758,9 @@ async fn persist_specialist_notifications_tx(
             "#,
         )
         .bind(user_id)
-        .bind("Helpin: apoio especializado necessario")
+        .bind("Apoio especializado necessário")
         .bind(format!(
-            "{} em {}. Caso sem resposta local; toque para coordenar ajuda especializada.",
+            "{} em {} precisa de ajuda especializada. Toque para coordenar pelo chat.",
             post.name, post.neighborhood
         ))
         .bind(&post.id)
@@ -800,8 +800,8 @@ async fn persist_specialist_notifications_tx(
         .bind(push_token)
         .bind(platform_as_str(platform))
         .bind(serde_json::json!({
-            "title": "Helpin: apoio especializado necessario",
-            "body": format!("{} em {} precisa de apoio especializado regional.", post.name, post.neighborhood),
+            "title": "Apoio especializado necessário",
+            "body": format!("{} em {} precisa de ajuda especializada. Toque para coordenar pelo chat.", post.name, post.neighborhood),
             "deeplink": format!("zoohelp://post/{}?action=specialist", post.id),
             "postId": post.id,
             "critical": true,
@@ -1368,9 +1368,9 @@ fn alert_for_candidates(
         id: Uuid::now_v7().to_string(),
         post_id: post.id.clone(),
         title: if post.urgent {
-            "Resgate urgente perto de voce".to_string()
+            "Resgate urgente perto de você".to_string()
         } else {
-            "Animal precisa de ajuda perto de voce".to_string()
+            "Animal precisa de ajuda perto de você".to_string()
         },
         body: format!(
             "{} em {}. Toque para confirmar ajuda, abrir rota ou coordenar pelo chat.",
