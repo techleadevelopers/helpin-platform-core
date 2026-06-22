@@ -282,7 +282,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
           push_token text NOT NULL,
           platform text NOT NULL,
           payload jsonb NOT NULL,
-          status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'sent', 'failed', 'dead_letter')),
+          status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'provider_accepted', 'delivered', 'failed', 'dead_letter')),
           attempts integer NOT NULL DEFAULT 0,
           next_attempt_at timestamptz NOT NULL DEFAULT now(),
           last_error text,
@@ -294,7 +294,14 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "CREATE INDEX IF NOT EXISTS push_delivery_jobs_due_created_idx ON push_delivery_jobs (status, next_attempt_at, created_at ASC) WHERE status IN ('queued', 'failed');",
         "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS provider_response jsonb;",
         "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS provider_ticket_id text;",
+        "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS provider_accepted_at timestamptz;",
+        "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS receipt_status text;",
+        "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS receipt_checked_at timestamptz;",
+        "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS receipt_response jsonb;",
         "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS delivered_at timestamptz;",
+        "ALTER TABLE push_delivery_jobs DROP CONSTRAINT IF EXISTS push_delivery_jobs_status_check;",
+        "ALTER TABLE push_delivery_jobs ADD CONSTRAINT push_delivery_jobs_status_check CHECK (status IN ('queued', 'provider_accepted', 'delivered', 'failed', 'dead_letter'));",
+        "CREATE INDEX IF NOT EXISTS push_delivery_jobs_receipt_due_idx ON push_delivery_jobs (status, provider_accepted_at) WHERE status = 'provider_accepted' AND provider_ticket_id IS NOT NULL;",
         "CREATE INDEX IF NOT EXISTS push_subscriptions_active_location_idx ON push_subscriptions (updated_at DESC, lat, lng) WHERE invalidated_at IS NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS user_ong_follows (
