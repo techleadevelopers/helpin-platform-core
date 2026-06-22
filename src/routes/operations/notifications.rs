@@ -146,6 +146,15 @@ pub async fn register_push_token(
         return Err(ApiError::Forbidden);
     }
 
+    if state.config.log_push_tokens {
+        tracing::warn!(
+            %user_id,
+            platform = ?payload.platform,
+            push_token = %payload.push_token,
+            "REAL_PUSH_TOKEN registered by backend"
+        );
+    }
+
     let subscription = PushSubscription {
         user_id: payload.user_id,
         push_token: payload.push_token,
