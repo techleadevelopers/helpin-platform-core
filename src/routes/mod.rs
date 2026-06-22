@@ -160,7 +160,12 @@ pub fn router(state: AppState) -> Router {
             get(users::list_public_user_following),
         )
         .route("/v1/users/:id", get(users::get_public_user_profile))
-        .route("/v1/users/:id/follow", post(users::follow_user))
+        .route(
+            "/v1/users/:id/follow",
+            post(users::follow_user)
+                .put(users::follow_user)
+                .delete(users::unfollow_user),
+        )
         .route(
             "/v1/posts/:id/rescue-response",
             post(posts::rescue_response),
@@ -283,6 +288,7 @@ mod tests {
     };
 
     const TEST_USER_ID: &str = "018f0000-0000-7000-8000-000000000001";
+    const TEST_SECOND_USER_ID: &str = "018f0000-0000-7000-8000-000000000002";
     const TEST_ONG_ID: &str = "018f0000-0000-7000-8000-000000000101";
     const TEST_FEED_POST_ID: &str = "018f0000-0000-7000-8000-000000000201";
     const TEST_MEDIA_INTENT_ID: &str = "018f0000-0000-7000-8000-000000000301";
@@ -338,19 +344,19 @@ mod tests {
             rescue_fanout_worker_enabled: false,
             push_provider: "expo".into(),
             expo_access_token: None,
+            log_push_tokens: false,
             throttle_ttl_seconds: 60,
             throttle_limit: 10,
         }
     }
 
     fn test_auth_header(account_type: AccountType) -> String {
-        let token = auth_service::issue_access_token(
-            &test_config(),
-            TEST_USER_ID,
-            "admin@zoohelp.test",
-            account_type,
-        )
-        .expect("test token");
+        test_auth_header_for(TEST_USER_ID, "admin@zoohelp.test", account_type)
+    }
+
+    fn test_auth_header_for(user_id: &str, email: &str, account_type: AccountType) -> String {
+        let token = auth_service::issue_access_token(&test_config(), user_id, email, account_type)
+            .expect("test token");
         format!("Bearer {token}")
     }
 
@@ -364,6 +370,30 @@ mod tests {
     }
 
     async fn seed_test_fixtures(state: &AppState) -> anyhow::Result<()> {
+        let test_user_id = uuid::Uuid::parse_str(TEST_USER_ID)?;
+        let test_second_user_id = uuid::Uuid::parse_str(TEST_SECOND_USER_ID)?;
+        let test_post_id = uuid::Uuid::parse_str(TEST_FEED_POST_ID)?;
+
+        sqlx::query(
+            "DELETE FROM user_follows WHERE follower_id IN ($1, $2) OR followed_id IN ($1, $2)",
+        )
+        .bind(test_user_id)
+        .bind(test_second_user_id)
+        .execute(&state.db)
+        .await?;
+        sqlx::query("DELETE FROM post_likes WHERE post_id = $1 AND user_id IN ($2, $3)")
+            .bind(test_post_id)
+            .bind(test_user_id)
+            .bind(test_second_user_id)
+            .execute(&state.db)
+            .await?;
+        sqlx::query("DELETE FROM post_comments WHERE post_id = $1 AND user_id IN ($2, $3)")
+            .bind(test_post_id)
+            .bind(test_user_id)
+            .bind(test_second_user_id)
+            .execute(&state.db)
+            .await?;
+
         sqlx::query(
             r#"
             INSERT INTO users (
@@ -384,6 +414,30 @@ mod tests {
             "#,
         )
         .bind(uuid::Uuid::parse_str(TEST_USER_ID)?)
+        .execute(&state.db)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO users (
+              id, name, email, avatar_url, password_hash, account_type, verified,
+              trust_score, gender, cep, street, number, complement, neighborhood, city, state
+            )
+            VALUES (
+              $1, 'Joao Teste ZooHelp', 'joao@zoohelp.test', 'https://cdn.zoohelp.local/users/joao.webp', 'test-hash',
+              'person', false, 20, NULL, NULL, NULL, NULL, NULL,
+              'Centro', 'Sao Paulo', 'SP'
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              name = EXCLUDED.name,
+              email = EXCLUDED.email,
+              account_type = EXCLUDED.account_type,
+              verified = EXCLUDED.verified,
+              avatar_url = EXCLUDED.avatar_url,
+              deleted_at = NULL
+            "#,
+        )
+        .bind(test_second_user_id)
         .execute(&state.db)
         .await?;
 
@@ -438,7 +492,10 @@ mod tests {
               urgent = EXCLUDED.urgent,
               rescue_status = EXCLUDED.rescue_status,
               route_public = EXCLUDED.route_public,
-              geo_status = EXCLUDED.geo_status
+              geo_status = EXCLUDED.geo_status,
+              likes_count = EXCLUDED.likes_count,
+              comments_count = EXCLUDED.comments_count,
+              shares_count = EXCLUDED.shares_count
             "#,
         )
         .bind(uuid::Uuid::parse_str(TEST_FEED_POST_ID)?)
@@ -544,6 +601,216 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body[0]["type"], "emergency");
         assert_eq!(body[0]["animalType"], "cat");
+    }
+
+    #[tokio::test]
+    async fn feed_and_detail_keep_real_post_author_for_other_viewer() {
+        let app = test_app().await;
+        let auth = test_auth_header_for(
+            TEST_SECOND_USER_ID,
+            "joao@zoohelp.test",
+            AccountType::Person,
+        );
+        let feed_request = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/feed?type=emergency")
+            .header("authorization", auth.clone())
+            .body(Body::empty())
+            .unwrap();
+
+        let (feed_status, feed_body) = request_json(app.clone(), feed_request).await;
+        assert_eq!(feed_status, StatusCode::OK);
+        assert_eq!(feed_body[0]["author"]["id"], TEST_USER_ID);
+        assert_eq!(feed_body[0]["author"]["name"], "Instituto Teste ZooHelp");
+
+        let detail_request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/posts/{TEST_FEED_POST_ID}"))
+            .header("authorization", auth)
+            .body(Body::empty())
+            .unwrap();
+
+        let (detail_status, detail_body) = request_json(app, detail_request).await;
+        assert_eq!(detail_status, StatusCode::OK);
+        assert_eq!(detail_body["author"]["id"], TEST_USER_ID);
+    }
+
+    #[tokio::test]
+    async fn non_author_cannot_delete_post() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/v1/posts/{TEST_FEED_POST_ID}"))
+            .header(
+                "authorization",
+                test_auth_header_for(
+                    TEST_SECOND_USER_ID,
+                    "joao@zoohelp.test",
+                    AccountType::Person,
+                ),
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, _body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn comments_keep_real_comment_author() {
+        let app = test_app().await;
+        let auth = test_auth_header_for(
+            TEST_SECOND_USER_ID,
+            "joao@zoohelp.test",
+            AccountType::Person,
+        );
+        let create_request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/posts/{TEST_FEED_POST_ID}/comments"))
+            .header("authorization", auth)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "body": "Posso ajudar no transporte." }).to_string(),
+            ))
+            .unwrap();
+
+        let (create_status, _body) = request_json(app.clone(), create_request).await;
+        assert_eq!(create_status, StatusCode::CREATED);
+
+        let list_request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/posts/{TEST_FEED_POST_ID}/comments"))
+            .body(Body::empty())
+            .unwrap();
+        let (list_status, list_body) = request_json(app, list_request).await;
+
+        assert_eq!(list_status, StatusCode::OK);
+        assert!(list_body
+            .as_array()
+            .expect("comments")
+            .iter()
+            .any(|comment| comment["author"]["id"] == TEST_SECOND_USER_ID));
+    }
+
+    #[tokio::test]
+    async fn like_and_unlike_are_scoped_to_authenticated_user() {
+        let app = test_app().await;
+        let auth = test_auth_header_for(
+            TEST_SECOND_USER_ID,
+            "joao@zoohelp.test",
+            AccountType::Person,
+        );
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v1/posts/{TEST_FEED_POST_ID}/like"))
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap();
+            let (status, body) = request_json(app.clone(), request).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["liked"], true);
+            assert_eq!(body["likes"], 1);
+        }
+
+        let unlike_request = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/v1/posts/{TEST_FEED_POST_ID}/like"))
+            .header("authorization", auth)
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = request_json(app, unlike_request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["liked"], false);
+        assert_eq!(body["likes"], 0);
+    }
+
+    #[tokio::test]
+    async fn public_profile_lists_only_requested_user_posts() {
+        let app = test_app().await;
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/users/{TEST_USER_ID}"))
+            .header(
+                "authorization",
+                test_auth_header_for(
+                    TEST_SECOND_USER_ID,
+                    "joao@zoohelp.test",
+                    AccountType::Person,
+                ),
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = request_json(app, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["posts"]
+            .as_array()
+            .expect("posts")
+            .iter()
+            .all(|post| post["author"]["id"] == TEST_USER_ID));
+        assert!(body["posts"]
+            .as_array()
+            .expect("posts")
+            .iter()
+            .any(|post| post["id"] == TEST_FEED_POST_ID));
+    }
+
+    #[tokio::test]
+    async fn follow_put_delete_are_idempotent_and_counts_are_correct() {
+        let app = test_app().await;
+        let auth = test_auth_header_for(
+            TEST_SECOND_USER_ID,
+            "joao@zoohelp.test",
+            AccountType::Person,
+        );
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v1/users/{TEST_USER_ID}/follow"))
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap();
+            let (status, body) = request_json(app.clone(), request).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["following"], true);
+            assert_eq!(body["followersCount"], 1);
+        }
+
+        let followers_request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/users/{TEST_USER_ID}/followers"))
+            .body(Body::empty())
+            .unwrap();
+        let (followers_status, followers_body) = request_json(app.clone(), followers_request).await;
+        assert_eq!(followers_status, StatusCode::OK);
+        assert_eq!(followers_body.as_array().expect("followers").len(), 1);
+        assert_eq!(followers_body[0]["id"], TEST_SECOND_USER_ID);
+
+        let self_follow_request = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v1/users/{TEST_SECOND_USER_ID}/follow"))
+            .header("authorization", auth.clone())
+            .body(Body::empty())
+            .unwrap();
+        let (self_status, _body) = request_json(app.clone(), self_follow_request).await;
+        assert_eq!(self_status, StatusCode::BAD_REQUEST);
+
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v1/users/{TEST_USER_ID}/follow"))
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap();
+            let (status, body) = request_json(app.clone(), request).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["following"], false);
+            assert_eq!(body["followersCount"], 0);
+        }
     }
 
     #[tokio::test]
