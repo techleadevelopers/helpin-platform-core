@@ -16,7 +16,7 @@ use crate::{
         feed::{load_db_posts, FeedQuery},
         posts::optional_authenticated_user_id,
     },
-    services::auth as auth_service,
+    services::{auth as auth_service, rate_limit},
     state::AppState,
 };
 
@@ -74,9 +74,18 @@ pub struct FollowUserResponse {
 }
 
 pub async fn list_public_users(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<PublicUserSearchQuery>,
 ) -> Result<Json<Vec<PublicUserSummary>>, ApiError> {
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "users:list",
+        60,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let term = query.q.unwrap_or_default().trim().to_lowercase();
     let limit = query.limit.unwrap_or(20).clamp(1, 50);
 
@@ -119,6 +128,14 @@ pub async fn get_public_user_profile(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PublicUserProfile>, ApiError> {
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "users:profile",
+        120,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let user_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     let viewer_id = optional_authenticated_user_id(&state, &headers);
     load_public_profile(&state, user_id, viewer_id)
@@ -128,10 +145,19 @@ pub async fn get_public_user_profile(
 }
 
 pub async fn list_public_user_followers(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<PublicUserRelationQuery>,
 ) -> Result<Json<Vec<PublicUserSummary>>, ApiError> {
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "users:followers",
+        60,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let user_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let users = list_user_relation_summaries(
@@ -161,10 +187,19 @@ pub async fn list_public_user_followers(
 }
 
 pub async fn list_public_user_following(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<PublicUserRelationQuery>,
 ) -> Result<Json<Vec<PublicUserSummary>>, ApiError> {
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "users:following",
+        60,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let user_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let users = list_user_relation_summaries(
@@ -217,6 +252,14 @@ async fn set_follow_user(
 ) -> Result<Json<FollowUserResponse>, ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let follower_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_user(
+        &state,
+        &follower_id.to_string(),
+        "follow:user",
+        60,
+        std::time::Duration::from_secs(60 * 60),
+    )
+    .await?;
     let followed_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     if follower_id == followed_id {
         return Err(ApiError::Validation("cannot follow yourself".into()));
