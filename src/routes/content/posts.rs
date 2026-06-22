@@ -18,7 +18,8 @@ use crate::{
     routes::auth::audit_event,
     services::notifications::RescueAlert,
     services::rescue_fanout::{
-        create_fanout_state_for_post, upsert_rescue_response, RescueResponseRecord,
+        create_fanout_state_for_post, upsert_rescue_response, wake_fanout_state,
+        RescueResponseRecord,
     },
     services::{auth as auth_service, fraud, rate_limit},
     state::{AppState, FeedEvent},
@@ -682,6 +683,7 @@ pub async fn create_post(
 
     let rescue_fanout_state_id = if geo_ready_for_alert {
         let state_id = create_fanout_state_for_post(&state.db, post_id, None).await?;
+        wake_fanout_state(state.db.clone(), state_id);
         tracing::info!(
             post_id = %post.id,
             fanout_state_id = %state_id,
