@@ -20,6 +20,7 @@ use crate::{
         animal_type_from_str, load_post_media, optional_authenticated_user_id, post_type_as_str,
         post_type_from_str,
     },
+    services::rate_limit,
     state::AppState,
 };
 
@@ -48,6 +49,12 @@ pub async fn list_feed(
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<Vec<Post>>, ApiError> {
     let viewer_id = optional_authenticated_user_id(&state, &headers);
+    let window = std::time::Duration::from_secs(60);
+    if let Some(user_id) = viewer_id {
+        rate_limit::check_user(&state, &user_id.to_string(), "feed:list", 120, window).await?;
+    } else {
+        rate_limit::check_ip(&state, &headers, "feed:list", 60, window).await?;
+    }
     if query.liked.is_some() && viewer_id.is_none() {
         return Err(ApiError::Unauthorized);
     }
