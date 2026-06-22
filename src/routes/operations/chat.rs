@@ -336,6 +336,24 @@ pub async fn send_message(
     if idempotency_key.len() > 160 {
         return Err(ApiError::Validation("idempotency-key is too long".into()));
     }
+    let retrying_existing_message: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM chat_messages WHERE room_id = $1 AND sender_id = $2 AND idempotency_key = $3",
+    )
+    .bind(room_id)
+    .bind(sender_id)
+    .bind(&idempotency_key)
+    .fetch_optional(&state.db)
+    .await?;
+    if retrying_existing_message.is_none() {
+        rate_limit::check_duplicate_text(
+            &state,
+            &sender_id.to_string(),
+            "chat:message",
+            &payload.body,
+            StdDuration::from_secs(5 * 60),
+        )
+        .await?;
+    }
 
     let (message, inserted) = persist_chat_message(
         &state,
