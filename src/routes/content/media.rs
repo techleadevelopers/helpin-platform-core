@@ -1,5 +1,3 @@
-use std::time::Duration as StdDuration;
-
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -67,11 +65,12 @@ pub async fn create_upload_intent(
     let claims = authenticate_request(&state, &headers)?;
     let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
 
-    rate_limit::check_key(
+    rate_limit::check_user(
         &state,
-        &format!("media:upload-intent:{user_id}"),
-        state.config.throttle_limit * 3,
-        StdDuration::from_secs(state.config.throttle_ttl_seconds),
+        &user_id.to_string(),
+        "media:upload-intent",
+        30,
+        std::time::Duration::from_secs(60 * 60),
     )
     .await?;
 
@@ -91,6 +90,30 @@ pub async fn create_upload_intent(
         return Err(ApiError::Validation(format!(
             "sizeBytes must be between 1 and {max_upload_bytes}"
         )));
+    }
+    if matches!(
+        payload.purpose.as_deref(),
+        Some("profile-avatar" | "ong-logo")
+    ) && media_kind != "image"
+    {
+        return Err(ApiError::Validation(
+            "profile-avatar and ong-logo uploads must be images".into(),
+        ));
+    }
+    let active_intents: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM media_upload_intents
+        WHERE user_id = $1
+          AND consumed_at IS NULL
+          AND expires_at > now()
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if active_intents >= 30 {
+        return Err(ApiError::TooManyRequests);
     }
 
     let api_key = state
