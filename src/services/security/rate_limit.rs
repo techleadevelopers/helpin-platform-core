@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
+use sha1::{Digest, Sha1};
 
 use crate::{error::ApiError, state::AppState};
 
@@ -12,7 +13,8 @@ pub async fn check_key(
 ) -> Result<(), ApiError> {
     if let Some(redis) = &state.redis {
         match check_redis(redis, key, max_requests, window).await {
-            Ok(()) => return Ok(()),
+            Ok(true) => return Ok(()),
+            Ok(false) => return Err(ApiError::TooManyRequests),
             Err(error) if state.config.is_development() => {
                 tracing::warn!(
                     ?error,
@@ -82,12 +84,40 @@ pub async fn check_user(
     .await
 }
 
+pub async fn check_duplicate_text(
+    state: &AppState,
+    user_id: &str,
+    action: &str,
+    text: &str,
+    window: Duration,
+) -> Result<(), ApiError> {
+    let normalized = normalize_text(text);
+    if normalized.len() < 8 {
+        return Ok(());
+    }
+    let digest = format!("{:x}", Sha1::digest(normalized.as_bytes()));
+    check_key(
+        state,
+        &format!("dedupe:{action}:{user_id}:{digest}"),
+        1,
+        window,
+    )
+    .await
+}
+
+fn normalize_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 async fn check_redis(
     redis: &redis::Client,
     key: &str,
     max_requests: usize,
     window: Duration,
-) -> Result<(), redis::RedisError> {
+) -> Result<bool, redis::RedisError> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let redis_key = format!("rate:{key}");
     let (count, _): (i64, bool) = redis::pipe()
@@ -98,11 +128,8 @@ async fn check_redis(
         .await?;
 
     if count > max_requests as i64 {
-        return Err(redis::RedisError::from((
-            redis::ErrorKind::BusyLoadingError,
-            "rate limit exceeded",
-        )));
+        return Ok(false);
     }
 
-    Ok(())
+    Ok(true)
 }
