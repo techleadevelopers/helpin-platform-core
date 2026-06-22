@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
@@ -43,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = routes::router(state)
+        .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(cors_layer(&config)?)
         .layer(TraceLayer::new_for_http());
 
