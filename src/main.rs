@@ -30,13 +30,25 @@ async fn main() -> anyhow::Result<()> {
     let _otel_provider = init_tracing(&config)?;
     let state = AppState::new(config.clone()).await?;
 
+    if !config.process_role.serves_http() {
+        tracing::info!(
+            process_role = ?config.process_role,
+            "zoohelp backend worker process started"
+        );
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to listen for shutdown signal")?;
+        tracing::info!("zoohelp backend worker process shutting down");
+        return Ok(());
+    }
+
     let app = routes::router(state)
         .layer(cors_layer(&config)?)
         .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = config.bind_addr.parse().context("invalid BIND_ADDR")?;
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "zoohelp rust backend listening");
+    tracing::info!(%addr, process_role = ?config.process_role, "zoohelp rust backend listening");
 
     axum::serve(listener, app).await?;
     Ok(())
