@@ -276,7 +276,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::Config, domain::AccountType, services::auth as auth_service, state::AppState,
+        config::{Config, ProcessRole},
+        domain::AccountType,
+        services::auth as auth_service,
+        state::AppState,
     };
 
     const TEST_USER_ID: &str = "018f0000-0000-7000-8000-000000000001";
@@ -292,6 +295,7 @@ mod tests {
 
         Config {
             app_env: "test".into(),
+            process_role: ProcessRole::All,
             bind_addr: "127.0.0.1:0".into(),
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into()),
