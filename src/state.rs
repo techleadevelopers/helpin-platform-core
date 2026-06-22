@@ -151,6 +151,8 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         "CREATE INDEX IF NOT EXISTS post_geocode_jobs_due_idx ON post_geocode_jobs (status, next_run_at) WHERE status IN ('pending', 'processing');",
+        "CREATE INDEX IF NOT EXISTS posts_moderation_created_idx ON posts (moderation_status, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS posts_operational_feed_idx ON posts (moderation_status, urgent, rescue_status, created_at DESC);",
         "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES users(id) ON DELETE CASCADE;",
         "CREATE UNIQUE INDEX IF NOT EXISTS chat_rooms_private_post_requester_idx ON chat_rooms (post_id, requester_id) WHERE post_id IS NOT NULL AND requester_id IS NOT NULL;",
         "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS direct_pair_key text;",
@@ -260,6 +262,8 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         "CREATE INDEX IF NOT EXISTS notification_events_user_created_idx ON notification_events (user_id, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS notification_events_user_kind_created_idx ON notification_events (user_id, kind, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS notification_events_post_kind_created_idx ON notification_events (post_id, kind, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS notification_events_dedupe_idx ON notification_events (dedupe_key, user_id);",
         "CREATE UNIQUE INDEX IF NOT EXISTS notification_events_user_dedupe_unique_idx ON notification_events (dedupe_key, user_id) WHERE dedupe_key IS NOT NULL AND user_id IS NOT NULL;",
         r#"
@@ -279,9 +283,11 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         "CREATE INDEX IF NOT EXISTS push_delivery_jobs_status_next_idx ON push_delivery_jobs (status, next_attempt_at);",
+        "CREATE INDEX IF NOT EXISTS push_delivery_jobs_due_created_idx ON push_delivery_jobs (status, next_attempt_at, created_at ASC) WHERE status IN ('queued', 'failed');",
         "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS provider_response jsonb;",
         "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS provider_ticket_id text;",
         "ALTER TABLE push_delivery_jobs ADD COLUMN IF NOT EXISTS delivered_at timestamptz;",
+        "CREATE INDEX IF NOT EXISTS push_subscriptions_active_location_idx ON push_subscriptions (updated_at DESC, lat, lng) WHERE invalidated_at IS NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS user_ong_follows (
           user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -451,6 +457,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "#,
         "CREATE INDEX IF NOT EXISTS rescue_responses_post_status_idx ON rescue_responses (post_id, status, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS rescue_responses_rescue_status_idx ON rescue_responses (rescue_session_id, status, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS rescue_responses_status_created_post_idx ON rescue_responses (status, created_at DESC, post_id);",
         r#"
         CREATE TABLE IF NOT EXISTS rescue_final_reports (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -485,6 +492,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "CREATE INDEX IF NOT EXISTS rescue_final_reports_rescue_id_idx ON rescue_final_reports (rescue_id);",
         "CREATE INDEX IF NOT EXISTS rescue_final_reports_post_id_idx ON rescue_final_reports (post_id);",
         "CREATE INDEX IF NOT EXISTS rescue_final_reports_publication_status_idx ON rescue_final_reports (publication_status);",
+        "CREATE INDEX IF NOT EXISTS rescue_final_reports_publication_status_status_post_idx ON rescue_final_reports (publication_status, status, post_id);",
         "CREATE INDEX IF NOT EXISTS rescue_final_reports_approved_at_idx ON rescue_final_reports (approved_at);",
         r#"
         CREATE TABLE IF NOT EXISTS rescue_fanout_states (
