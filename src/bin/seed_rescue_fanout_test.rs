@@ -67,16 +67,125 @@ async fn main() -> anyhow::Result<()> {
             report(&pool).await?;
         }
         "simulate-response" => {
+            ensure_seed_exists(&pool).await?;
             simulate_response_and_chat(&pool).await?;
+            report(&pool).await?;
+        }
+        "queue-push" => {
+            ensure_seed_exists(&pool).await?;
+            queue_test_push(&pool).await?;
             report(&pool).await?;
         }
         "reset" => reset_seed(&pool).await?,
         "report" => report(&pool).await?,
         other => anyhow::bail!(
-            "unknown command '{other}', use seed, simulate-response, reset, or report"
+            "unknown command '{other}', use seed, queue-push, simulate-response, reset, or report"
         ),
     }
 
+    Ok(())
+}
+
+async fn ensure_seed_exists(pool: &PgPool) -> anyhow::Result<()> {
+    let post_id = Uuid::parse_str(POST_ID)?;
+    let rescue_id = Uuid::parse_str(RESCUE_ID)?;
+    let exists: Option<bool> = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+          SELECT 1
+          FROM posts p
+          JOIN rescue_sessions rs ON rs.post_id = p.id
+          JOIN rescue_fanout_states fs ON fs.post_id = p.id
+          WHERE p.id = $1 AND rs.id = $2
+        )
+        "#,
+    )
+    .bind(post_id)
+    .bind(rescue_id)
+    .fetch_one(pool)
+    .await?;
+
+    if exists.unwrap_or(false) {
+        return Ok(());
+    }
+
+    println!("seed_missing: creating rescue fanout seed before simulate-response");
+    seed(pool).await
+}
+
+async fn queue_test_push(pool: &PgPool) -> anyhow::Result<()> {
+    let post_id = Uuid::parse_str(POST_ID)?;
+    let user_id = Uuid::parse_str(NEAR_100_ID)?;
+    let row = sqlx::query(
+        r#"
+        SELECT push_token, platform
+        FROM push_subscriptions
+        WHERE user_id = $1 AND invalidated_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("missing push subscription for rescue_fanout_test+near100@helpin.local; run seed first"))?;
+
+    let push_token: String = row.get("push_token");
+    let platform: String = row.get("platform");
+    let dedupe_key = format!("rescue_fanout_test:manual-push:{POST_ID}");
+    let event_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO notification_events (
+          user_id, kind, title, body, post_id, distance_km, critical, deeplink,
+          dedupe_key, ttl_seconds, category, payload
+        )
+        VALUES (
+          $1, 'rescue_alert', 'Teste ZooHelp', 'Push operacional de teste do seed.',
+          $2, 0.1, true, $3, $4, 300, 'rescue',
+          jsonb_build_object('source', 'seed_rescue_fanout_test', 'mode', 'queue-push')
+        )
+        ON CONFLICT (dedupe_key, user_id)
+          WHERE dedupe_key IS NOT NULL AND user_id IS NOT NULL
+        DO UPDATE SET
+          title = EXCLUDED.title,
+          body = EXCLUDED.body,
+          created_at = now(),
+          read_at = NULL,
+          acked_at = NULL
+        RETURNING id
+        "#,
+    )
+    .bind(user_id)
+    .bind(POST_ID)
+    .bind(format!("zoohelp://post/{POST_ID}"))
+    .bind(dedupe_key)
+    .fetch_one(pool)
+    .await?;
+
+    let job_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO push_delivery_jobs (
+          notification_event_id, user_id, push_token, platform, payload
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        "#,
+    )
+    .bind(event_id)
+    .bind(user_id)
+    .bind(&push_token)
+    .bind(&platform)
+    .bind(serde_json::json!({
+        "title": "Teste ZooHelp",
+        "body": "Push operacional de teste do seed.",
+        "deeplink": format!("zoohelp://post/{POST_ID}"),
+        "postId": post_id,
+        "critical": true
+    }))
+    .fetch_one(pool)
+    .await?;
+
+    println!("queue_push: ok job_id={job_id} token={}", mask_token(&push_token));
     Ok(())
 }
 
