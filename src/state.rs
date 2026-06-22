@@ -218,6 +218,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         );
         "#,
         "CREATE INDEX IF NOT EXISTS media_upload_intents_user_idx ON media_upload_intents (user_id, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS media_upload_intents_user_active_idx ON media_upload_intents (user_id, expires_at DESC) WHERE consumed_at IS NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS audit_events (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -387,6 +388,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         r#"
         CREATE TABLE IF NOT EXISTS support_tickets (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id uuid REFERENCES users(id) ON DELETE SET NULL,
           subject text NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 160),
           status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'pending', 'resolved', 'closed')),
           category text NOT NULL DEFAULT 'OTHER',
@@ -395,7 +397,9 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
           updated_at timestamptz NOT NULL DEFAULT now()
         );
         "#,
+        "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES users(id) ON DELETE SET NULL;",
         "CREATE INDEX IF NOT EXISTS support_tickets_status_created_idx ON support_tickets (status, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS support_tickets_user_created_idx ON support_tickets (user_id, created_at DESC) WHERE user_id IS NOT NULL;",
         r#"
         CREATE TABLE IF NOT EXISTS support_ticket_messages (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
