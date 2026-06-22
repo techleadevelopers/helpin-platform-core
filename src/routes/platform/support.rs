@@ -77,14 +77,17 @@ pub async fn list_tickets(
         std::time::Duration::from_secs(60),
     )
     .await?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let rows = sqlx::query(
         r#"
         SELECT id, subject, status, category, severity, created_at
         FROM support_tickets
+        WHERE user_id = $1
         ORDER BY created_at DESC
         LIMIT 200
         "#,
     )
+    .bind(user_id)
     .fetch_all(&state.db)
     .await?;
     let mut tickets = Vec::with_capacity(rows.len());
@@ -110,19 +113,29 @@ pub async fn create_ticket(
         std::time::Duration::from_secs(60 * 60),
     )
     .await?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
+    rate_limit::check_duplicate_text(
+        &state,
+        &claims.sub,
+        "support:create",
+        &format!("{} {}", payload.subject, payload.body),
+        std::time::Duration::from_secs(10 * 60),
+    )
+    .await?;
 
     let mut tx = state.db.begin().await?;
     let ticket_row = sqlx::query(
         r#"
-        INSERT INTO support_tickets (id, subject, category, severity)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO support_tickets (id, user_id, subject, category, severity)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, subject, status, category, severity, created_at
         "#,
     )
     .bind(Uuid::now_v7())
+    .bind(user_id)
     .bind(payload.subject.trim())
     .bind(normalize_category(payload.category.as_deref()))
     .bind(normalize_severity(payload.severity.as_deref()))
@@ -163,14 +176,16 @@ pub async fn get_ticket(
         std::time::Duration::from_secs(60),
     )
     .await?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let row = sqlx::query(
         r#"
         SELECT id, subject, status, category, severity, created_at
         FROM support_tickets
-        WHERE id = $1
+        WHERE id = $1 AND user_id = $2
         "#,
     )
     .bind(id)
+    .bind(user_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(ApiError::NotFound)?;
@@ -193,14 +208,25 @@ pub async fn add_message(
         std::time::Duration::from_secs(60 * 60),
     )
     .await?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
+    rate_limit::check_duplicate_text(
+        &state,
+        &claims.sub,
+        "support:message",
+        &payload.body,
+        std::time::Duration::from_secs(10 * 60),
+    )
+    .await?;
 
-    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM support_tickets WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM support_tickets WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -217,8 +243,9 @@ pub async fn add_message(
     .bind(payload.body.trim())
     .fetch_one(&state.db)
     .await?;
-    sqlx::query("UPDATE support_tickets SET updated_at = now() WHERE id = $1")
+    sqlx::query("UPDATE support_tickets SET updated_at = now() WHERE id = $1 AND user_id = $2")
         .bind(id)
+        .bind(user_id)
         .execute(&state.db)
         .await?;
 
