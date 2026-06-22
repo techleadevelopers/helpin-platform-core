@@ -160,6 +160,7 @@ async fn ensure_runtime_schema(db: &PgPool, postgis_enabled: bool) -> anyhow::Re
         "#,
         "CREATE INDEX IF NOT EXISTS post_geocode_jobs_due_idx ON post_geocode_jobs (status, next_run_at) WHERE status IN ('pending', 'processing');",
         "CREATE INDEX IF NOT EXISTS posts_moderation_created_idx ON posts (moderation_status, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS posts_author_created_idx ON posts (author_id, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS posts_operational_feed_idx ON posts (moderation_status, urgent, rescue_status, created_at DESC);",
         "ALTER TABLE chat_rooms ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES users(id) ON DELETE CASCADE;",
         "CREATE UNIQUE INDEX IF NOT EXISTS chat_rooms_private_post_requester_idx ON chat_rooms (post_id, requester_id) WHERE post_id IS NOT NULL AND requester_id IS NOT NULL;",
