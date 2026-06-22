@@ -1,10 +1,18 @@
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+
 use axum::{extract::State, Json};
 use chrono::Utc;
 use serde::Serialize;
 
 use crate::{error::ApiError, state::AppState};
 
-#[derive(Debug, Serialize)]
+const IMPACT_METRICS_TTL: Duration = Duration::from_secs(30);
+static IMPACT_METRICS_CACHE: OnceLock<Mutex<Option<(Instant, ImpactMetrics)>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImpactMetrics {
     pub resolved_cases: i64,
@@ -20,6 +28,10 @@ pub struct ImpactMetrics {
 }
 
 pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics>, ApiError> {
+    if let Some(cached) = cached_metrics() {
+        return Ok(Json(cached));
+    }
+
     let db = &state.db;
 
     let resolved_cases = scalar_i64(
@@ -75,7 +87,7 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
           AND (
             u.verified = true
             OR op.verified_at IS NOT NULL
-            OR COALESCE(op.verification_status, '') = 'approved'
+            OR COALESCE(op.verification_status, '') = 'APPROVED'
           )
         "#,
     )
@@ -146,7 +158,7 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
     )
     .await?;
 
-    Ok(Json(ImpactMetrics {
+    let metrics = ImpactMetrics {
         resolved_cases,
         animals_helped,
         confirmed_help_cases,
@@ -157,7 +169,9 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
         median_first_response_seconds,
         median_geocode_activation_seconds,
         generated_at: Utc::now().to_rfc3339(),
-    }))
+    };
+    store_metrics(metrics.clone());
+    Ok(Json(metrics))
 }
 
 async fn scalar_i64(db: &sqlx::PgPool, query: &str) -> Result<i64, ApiError> {
@@ -171,4 +185,18 @@ async fn scalar_seconds(db: &sqlx::PgPool, query: &str) -> Result<Option<i64>, A
     Ok(value
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
         .map(|seconds| seconds.round() as i64))
+}
+
+fn cached_metrics() -> Option<ImpactMetrics> {
+    let cache = IMPACT_METRICS_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let (created_at, metrics) = guard.as_ref()?;
+    (created_at.elapsed() <= IMPACT_METRICS_TTL).then(|| metrics.clone())
+}
+
+fn store_metrics(metrics: ImpactMetrics) {
+    let cache = IMPACT_METRICS_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), metrics));
+    }
 }
