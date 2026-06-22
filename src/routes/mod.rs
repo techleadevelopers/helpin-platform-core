@@ -393,6 +393,11 @@ mod tests {
             .bind(test_second_user_id)
             .execute(&state.db)
             .await?;
+        sqlx::query("DELETE FROM support_tickets WHERE user_id IN ($1, $2)")
+            .bind(test_user_id)
+            .bind(test_second_user_id)
+            .execute(&state.db)
+            .await?;
 
         sqlx::query(
             r#"
@@ -1009,6 +1014,66 @@ mod tests {
         assert_eq!(body["cloudinary"]["apiKey"], "test-api-key");
         assert!(body["cloudinary"]["signature"].as_str().unwrap().len() >= 40);
         assert_eq!(body["maxSizeBytes"], 10 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn support_tickets_are_scoped_to_authenticated_user() {
+        let app = test_app().await;
+        let paulo_auth = test_auth_header_for(TEST_USER_ID, "admin@zoohelp.test", AccountType::Ong);
+        let joao_auth = test_auth_header_for(
+            TEST_SECOND_USER_ID,
+            "joao@zoohelp.test",
+            AccountType::Person,
+        );
+        let create_request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/support/tickets")
+            .header("content-type", "application/json")
+            .header("authorization", &paulo_auth)
+            .body(Body::from(
+                json!({
+                    "subject": "Problema no perfil",
+                    "body": "Preciso de ajuda com meu perfil no aplicativo.",
+                    "category": "APP",
+                    "severity": "LOW"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (create_status, create_body) = request_json(app.clone(), create_request).await;
+
+        assert_eq!(create_status, StatusCode::CREATED);
+        let ticket_id = create_body["id"].as_str().expect("ticket id");
+
+        let paulo_list = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/support/tickets")
+            .header("authorization", &paulo_auth)
+            .body(Body::empty())
+            .unwrap();
+        let (paulo_status, paulo_body) = request_json(app.clone(), paulo_list).await;
+        assert_eq!(paulo_status, StatusCode::OK);
+        assert_eq!(paulo_body.as_array().unwrap().len(), 1);
+
+        let joao_list = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/support/tickets")
+            .header("authorization", &joao_auth)
+            .body(Body::empty())
+            .unwrap();
+        let (joao_status, joao_body) = request_json(app.clone(), joao_list).await;
+        assert_eq!(joao_status, StatusCode::OK);
+        assert_eq!(joao_body.as_array().unwrap().len(), 0);
+
+        let joao_get = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/support/tickets/{ticket_id}"))
+            .header("authorization", &joao_auth)
+            .body(Body::empty())
+            .unwrap();
+        let (joao_get_status, _body) = request_json(app, joao_get).await;
+        assert_eq!(joao_get_status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
