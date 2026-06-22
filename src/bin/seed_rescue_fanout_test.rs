@@ -128,7 +128,11 @@ async fn queue_test_push(pool: &PgPool) -> anyhow::Result<()> {
     .bind(user_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| anyhow::anyhow!("missing push subscription for rescue_fanout_test+near100@helpin.local; run seed first"))?;
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing push subscription for rescue_fanout_test+near100@helpin.local; run seed first"
+        )
+    })?;
 
     let push_token: String = row.get("push_token");
     let platform: String = row.get("platform");
@@ -185,7 +189,10 @@ async fn queue_test_push(pool: &PgPool) -> anyhow::Result<()> {
     .fetch_one(pool)
     .await?;
 
-    println!("queue_push: ok job_id={job_id} token={}", mask_token(&push_token));
+    println!(
+        "queue_push: ok job_id={job_id} token={}",
+        mask_token(&push_token)
+    );
     Ok(())
 }
 
