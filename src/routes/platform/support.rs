@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     http::StatusCode,
     Json,
 };
@@ -9,7 +10,9 @@ use sqlx::Row;
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::{error::ApiError, state::AppState};
+use crate::{
+    error::ApiError, routes::auth::authenticate_request, services::rate_limit, state::AppState,
+};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,8 +65,18 @@ pub async fn meta() -> Json<SupportMeta> {
 }
 
 pub async fn list_tickets(
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SupportTicket>>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    rate_limit::check_user(
+        &state,
+        &claims.sub,
+        "support:list",
+        30,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         SELECT id, subject, status, category, severity, created_at
@@ -84,9 +97,19 @@ pub async fn list_tickets(
 }
 
 pub async fn create_ticket(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<CreateTicketRequest>,
 ) -> Result<(StatusCode, Json<SupportTicket>), ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    rate_limit::check_user(
+        &state,
+        &claims.sub,
+        "support:create",
+        5,
+        std::time::Duration::from_secs(60 * 60),
+    )
+    .await?;
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
@@ -127,9 +150,19 @@ pub async fn create_ticket(
 }
 
 pub async fn get_ticket(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SupportTicket>, ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    rate_limit::check_user(
+        &state,
+        &claims.sub,
+        "support:get",
+        60,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         SELECT id, subject, status, category, severity, created_at
@@ -146,10 +179,20 @@ pub async fn get_ticket(
 }
 
 pub async fn add_message(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(payload): Json<AddMessageRequest>,
 ) -> Result<(StatusCode, Json<SupportMessage>), ApiError> {
+    let claims = authenticate_request(&state, &headers)?;
+    rate_limit::check_user(
+        &state,
+        &claims.sub,
+        "support:message",
+        20,
+        std::time::Duration::from_secs(60 * 60),
+    )
+    .await?;
     payload
         .validate()
         .map_err(|error| ApiError::Validation(error.to_string()))?;
