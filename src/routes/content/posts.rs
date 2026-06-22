@@ -493,6 +493,14 @@ pub async fn create_post(
     } else {
         "open"
     };
+    rate_limit::check_duplicate_text(
+        &state,
+        &author_id.to_string(),
+        "posts:create",
+        &description,
+        StdDuration::from_secs(15 * 60),
+    )
+    .await?;
 
     let mut tx = state.db.begin().await?;
     for (index, item) in media.iter().enumerate() {
@@ -515,10 +523,20 @@ pub async fn create_post(
               AND consumed_at IS NULL
               AND expires_at > now()
               AND (object_key = $2 OR public_url = $2)
+              AND content_type = $3
+              AND resource_type = $4
+              AND ($5::bigint IS NULL OR size_bytes = $5)
             "#,
         )
         .bind(author_id)
         .bind(upload_ref)
+        .bind(&item.content_type)
+        .bind(if item.content_type.starts_with("video/") {
+            "video"
+        } else {
+            "image"
+        })
+        .bind(item.size_bytes.map(|value| value as i64))
         .execute(&mut *tx)
         .await?;
 
@@ -1005,6 +1023,14 @@ pub async fn create_comment(
         StdDuration::from_secs(state.config.throttle_ttl_seconds),
     )
     .await?;
+    rate_limit::check_duplicate_text(
+        &state,
+        &user_id.to_string(),
+        "posts:comment",
+        &payload.body,
+        StdDuration::from_secs(10 * 60),
+    )
+    .await?;
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     ensure_post_exists(&state, post_id).await?;
 
@@ -1118,6 +1144,18 @@ pub async fn report_post(
         &format!("posts:report:{reporter_id}"),
         state.config.throttle_limit.max(2) / 2,
         StdDuration::from_secs(state.config.throttle_ttl_seconds * 5),
+    )
+    .await?;
+    rate_limit::check_duplicate_text(
+        &state,
+        &reporter_id.to_string(),
+        "posts:report",
+        &format!(
+            "{} {}",
+            payload.reason,
+            payload.details.as_deref().unwrap_or("")
+        ),
+        StdDuration::from_secs(60 * 60),
     )
     .await?;
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
