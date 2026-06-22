@@ -93,6 +93,7 @@ pub fn account_type_from_str(value: &str) -> AccountType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProcessRole;
 
     #[test]
     fn password_hash_verifies_and_rejects_wrong_password() {
@@ -106,6 +107,7 @@ mod tests {
     fn access_token_round_trips_claims() {
         let config = Config {
             app_env: "test".into(),
+            process_role: ProcessRole::All,
             bind_addr: "127.0.0.1:0".into(),
             database_url: "postgres://zoohelp:zoohelp@localhost:5432/zoohelp".into(),
             database_max_connections: 5,
