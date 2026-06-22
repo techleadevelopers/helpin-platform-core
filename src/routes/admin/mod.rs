@@ -1146,7 +1146,7 @@ fn row_to_rescue_final_report_admin(row: sqlx::postgres::PgRow) -> RescueFinalRe
 
 fn row_to_queue_job(row: sqlx::postgres::PgRow) -> QueueJob {
     let status: String = row.get("status");
-    let finished_at = if matches!(status, "provider_accepted" | "delivered") {
+    let finished_at = if matches!(status.as_str(), "provider_accepted" | "delivered") {
         Some(row.get("updated_at"))
     } else {
         None
@@ -1162,7 +1162,7 @@ fn row_to_queue_job(row: sqlx::postgres::PgRow) -> QueueJob {
             _ => status.as_str(),
         }
         .into(),
-        progress: if matches!(status, "provider_accepted" | "delivered") {
+        progress: if matches!(status.as_str(), "provider_accepted" | "delivered") {
             100
         } else {
             0
