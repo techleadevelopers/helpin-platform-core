@@ -1,5 +1,6 @@
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,9 @@ use crate::{
     routes::{
         feed::{load_db_posts, FeedQuery},
         ongs::load_db_ongs,
+        posts::optional_authenticated_user_id,
     },
+    services::rate_limit,
     state::AppState,
 };
 
@@ -26,9 +29,16 @@ pub struct SearchResponse {
 }
 
 pub async fn search(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
+    let window = std::time::Duration::from_secs(60);
+    if let Some(user_id) = optional_authenticated_user_id(&state, &headers) {
+        rate_limit::check_user(&state, &user_id.to_string(), "search", 30, window).await?;
+    } else {
+        rate_limit::check_ip(&state, &headers, "search", 20, window).await?;
+    }
     let q = query.q.unwrap_or_default().trim().to_lowercase();
 
     let posts = load_db_posts(
