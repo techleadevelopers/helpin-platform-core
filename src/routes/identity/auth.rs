@@ -182,12 +182,21 @@ pub struct OngRegistrationProfile {
 }
 
 pub async fn login(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "auth:login",
+        5,
+        StdDuration::from_secs(60),
+    )
+    .await?;
     rate_limit::check_key(
         &state,
         &format!("auth:login:{}", payload.email),
@@ -242,12 +251,21 @@ pub async fn login(
 }
 
 pub async fn register(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "auth:register",
+        3,
+        StdDuration::from_secs(60 * 60),
+    )
+    .await?;
     rate_limit::check_key(
         &state,
         &format!("auth:register:{}", payload.email),
@@ -296,17 +314,30 @@ pub async fn register(
 }
 
 pub async fn request_password_reset(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<PasswordResetRequest>,
 ) -> Result<Json<ActionQueuedResponse>, ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "auth:password-reset",
+        6,
+        StdDuration::from_secs(60 * 60),
+    )
+    .await?;
     rate_limit::check_key(
         &state,
-        &format!("auth:password-reset:{}", payload.email.to_lowercase()),
+        &format!(
+            "auth:password-reset:{}:{}",
+            payload.email.to_lowercase(),
+            rate_limit::client_ip(&headers)
+        ),
         3,
-        StdDuration::from_secs(15 * 60),
+        StdDuration::from_secs(60 * 60),
     )
     .await?;
     queue_password_reset(&state, &payload.email).await;
@@ -314,12 +345,21 @@ pub async fn request_password_reset(
 }
 
 pub async fn confirm_password_reset(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<ConfirmPasswordResetRequest>,
 ) -> Result<Json<ActionQueuedResponse>, ApiError> {
     payload
         .validate()
         .map_err(|e| ApiError::Validation(e.to_string()))?;
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "auth:password-reset-confirm",
+        10,
+        StdDuration::from_secs(60),
+    )
+    .await?;
     rate_limit::check_key(
         &state,
         "auth:password-reset-confirm",
