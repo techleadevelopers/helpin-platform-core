@@ -194,8 +194,6 @@ pub async fn metrics(State(state): State<AppState>) -> Result<Json<ImpactMetrics
         )
         SELECT EXTRACT(EPOCH FROM (first_support.created_at - baseline.created_at))::double precision
         FROM baseline, first_support
-        WHERE baseline.created_at IS NOT NULL
-          AND first_support.created_at IS NOT NULL
         "#,
     )
     .await?;
