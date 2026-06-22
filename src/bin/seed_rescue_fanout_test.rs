@@ -13,12 +13,40 @@ const BASE_LAT: f64 = -23.561684;
 const BASE_LNG: f64 = -46.655981;
 
 const AUTHOR_ID: &str = "77777777-7777-7777-8777-777777777701";
-const NEAR_ID: &str = "77777777-7777-7777-8777-777777777702";
-const FAR_ID: &str = "77777777-7777-7777-8777-777777777703";
-const ONG_USER_ID: &str = "77777777-7777-7777-8777-777777777704";
-const ONG_ID: &str = "77777777-7777-7777-8777-777777777705";
-const POST_ID: &str = "77777777-7777-7777-8777-777777777706";
-const RESCUE_ID: &str = "77777777-7777-7777-8777-777777777707";
+const NEAR_100_ID: &str = "77777777-7777-7777-8777-777777777702";
+const NEAR_500_ID: &str = "77777777-7777-7777-8777-777777777703";
+const NEAR_900_ID: &str = "77777777-7777-7777-8777-777777777704";
+const FAR_5K_ID: &str = "77777777-7777-7777-8777-777777777705";
+const NO_PUSH_ID: &str = "77777777-7777-7777-8777-777777777706";
+const INVALID_PUSH_ID: &str = "77777777-7777-7777-8777-777777777707";
+const ONG_USER_ID: &str = "77777777-7777-7777-8777-777777777708";
+const ONG_ID: &str = "77777777-7777-7777-8777-777777777709";
+const POST_ID: &str = "77777777-7777-7777-8777-777777777710";
+const RESCUE_ID: &str = "77777777-7777-7777-8777-777777777711";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedMode {
+    Fake,
+    RealDevice,
+}
+
+impl SeedMode {
+    fn from_env() -> anyhow::Result<Self> {
+        let raw = env::var("SEED_MODE").unwrap_or_else(|_| "fake".to_string());
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "fake" => Ok(Self::Fake),
+            "real_device" | "real-device" | "real" => Ok(Self::RealDevice),
+            other => anyhow::bail!("SEED_MODE must be fake or real_device, got {other}"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fake => "fake",
+            Self::RealDevice => "real_device",
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,9 +66,15 @@ async fn main() -> anyhow::Result<()> {
             seed(&pool).await?;
             report(&pool).await?;
         }
+        "simulate-response" => {
+            simulate_response_and_chat(&pool).await?;
+            report(&pool).await?;
+        }
         "reset" => reset_seed(&pool).await?,
         "report" => report(&pool).await?,
-        other => anyhow::bail!("unknown command '{other}', use seed, reset, or report"),
+        other => anyhow::bail!(
+            "unknown command '{other}', use seed, simulate-response, reset, or report"
+        ),
     }
 
     Ok(())
@@ -48,22 +82,28 @@ async fn main() -> anyhow::Result<()> {
 
 async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     let started = Instant::now();
-    let real_push_token = env::var("HELPIN_REAL_PUSH_TOKEN")
+    let mode = SeedMode::from_env()?;
+    let real_push_token = env::var("REAL_PUSH_TOKEN")
+        .or_else(|_| env::var("HELPIN_REAL_PUSH_TOKEN"))
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let real_platform = env::var("HELPIN_REAL_PUSH_PLATFORM")
+    if mode == SeedMode::RealDevice && real_push_token.is_none() {
+        anyhow::bail!("SEED_MODE=real_device requires REAL_PUSH_TOKEN=ExponentPushToken[...]");
+    }
+    let real_platform = env::var("REAL_PUSH_PLATFORM")
+        .or_else(|_| env::var("HELPIN_REAL_PUSH_PLATFORM"))
         .unwrap_or_else(|_| "android".to_string())
         .to_ascii_lowercase();
-    let near_token = real_push_token
+    let near_100_token = real_push_token
         .clone()
-        .unwrap_or_else(|| "ExponentPushToken[rescue-fanout-test-near]".to_string());
+        .unwrap_or_else(|| "ExponentPushToken[rescue-fanout-test-near100]".to_string());
 
     upsert_user(
         pool,
         AUTHOR_ID,
-        "Autor Seed Resgate",
-        "rescue_fanout_test+autor@helpin.local",
+        "[seed rescue] Autor do caso",
+        "rescue_fanout_test+author@helpin.local",
         "person",
         true,
         80,
@@ -71,9 +111,9 @@ async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     upsert_user(
         pool,
-        NEAR_ID,
-        "Protetor Seed Proximo",
-        "rescue_fanout_test+proximo@helpin.local",
+        NEAR_100_ID,
+        "[seed rescue] Protetor 100m",
+        "rescue_fanout_test+near100@helpin.local",
         "person",
         true,
         85,
@@ -81,9 +121,29 @@ async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     upsert_user(
         pool,
-        FAR_ID,
-        "Protetor Seed Longe",
-        "rescue_fanout_test+longe@helpin.local",
+        NEAR_500_ID,
+        "[seed rescue] Protetor 500m",
+        "rescue_fanout_test+near500@helpin.local",
+        "person",
+        true,
+        82,
+    )
+    .await?;
+    upsert_user(
+        pool,
+        NEAR_900_ID,
+        "[seed rescue] Protetor 900m",
+        "rescue_fanout_test+near900@helpin.local",
+        "person",
+        true,
+        79,
+    )
+    .await?;
+    upsert_user(
+        pool,
+        FAR_5K_ID,
+        "[seed rescue] Protetor 5km",
+        "rescue_fanout_test+far5km@helpin.local",
         "person",
         true,
         70,
@@ -91,8 +151,28 @@ async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     upsert_user(
         pool,
+        NO_PUSH_ID,
+        "[seed rescue] Usuario sem push",
+        "rescue_fanout_test+nopush@helpin.local",
+        "person",
+        true,
+        75,
+    )
+    .await?;
+    upsert_user(
+        pool,
+        INVALID_PUSH_ID,
+        "[seed rescue] Token invalido",
+        "rescue_fanout_test+invalidpush@helpin.local",
+        "person",
+        true,
+        76,
+    )
+    .await?;
+    upsert_user(
+        pool,
         ONG_USER_ID,
-        "ONG Seed Verificada",
+        "[seed rescue] ONG verificada",
         "rescue_fanout_test+ong@helpin.local",
         "ong",
         true,
@@ -103,8 +183,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<()> {
 
     upsert_push_subscription(
         pool,
-        NEAR_ID,
-        &near_token,
+        NEAR_100_ID,
+        &near_100_token,
         &real_platform,
         BASE_LAT + 0.0009,
         BASE_LNG,
@@ -113,10 +193,40 @@ async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     upsert_push_subscription(
         pool,
-        FAR_ID,
-        "ExponentPushToken[rescue-fanout-test-far]",
+        NEAR_500_ID,
+        "ExponentPushToken[rescue-fanout-test-near500]",
         "expo",
-        BASE_LAT + 0.0600,
+        BASE_LAT + 0.0045,
+        BASE_LNG,
+        8.0,
+    )
+    .await?;
+    upsert_push_subscription(
+        pool,
+        NEAR_900_ID,
+        "ExponentPushToken[rescue-fanout-test-near900]",
+        "expo",
+        BASE_LAT + 0.0081,
+        BASE_LNG,
+        8.0,
+    )
+    .await?;
+    upsert_push_subscription(
+        pool,
+        FAR_5K_ID,
+        "ExponentPushToken[rescue-fanout-test-far5km]",
+        "expo",
+        BASE_LAT + 0.0450,
+        BASE_LNG,
+        8.0,
+    )
+    .await?;
+    upsert_push_subscription(
+        pool,
+        INVALID_PUSH_ID,
+        "ExponentPushToken[rescue-fanout-test-invalid]",
+        "expo",
+        BASE_LAT + 0.0007,
         BASE_LNG,
         8.0,
     )
@@ -137,9 +247,11 @@ async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     upsert_fanout_state(pool).await?;
 
     println!("seed_tag: {SEED_TAG}");
+    println!("seed_mode: {}", mode.as_str());
     println!("post_id: {POST_ID}");
     println!("rescue_id: {RESCUE_ID}");
-    println!("near_push_token_real: {}", real_push_token.is_some());
+    println!("real_push_token_attached_to: rescue_fanout_test+near100@helpin.local");
+    println!("real_push_token_enabled: {}", real_push_token.is_some());
     println!("seed_elapsed_ms: {}", started.elapsed().as_millis());
     println!("next: run backend with RESCUE_FANOUT_WORKER_ENABLED=true and PUSH_WORKER_ENABLED=true, then run `cargo run --bin seed_rescue_fanout_test report`");
 
@@ -210,20 +322,23 @@ async fn reset_seed(pool: &PgPool) -> anyhow::Result<()> {
         .bind(post_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM posts WHERE id = $1 OR $2 = ANY(tags)")
+    sqlx::query("DELETE FROM posts WHERE id = $1 OR $2 = ANY(tags) OR $3 = ANY(tags)")
         .bind(post_id)
         .bind(SEED_TAG)
+        .bind(format!("#{SEED_TAG}"))
         .execute(pool)
         .await?;
     sqlx::query("DELETE FROM push_subscriptions WHERE user_id = ANY($1) OR push_token LIKE 'ExponentPushToken[rescue-fanout-test%'")
         .bind(&seed_user_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM ong_profiles WHERE id = $1 OR user_id = $2")
-        .bind(Uuid::parse_str(ONG_ID)?)
-        .bind(Uuid::parse_str(ONG_USER_ID)?)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "DELETE FROM ong_profiles WHERE id = $1 OR user_id = ANY($2) OR cnpj = '77999999000177'",
+    )
+    .bind(Uuid::parse_str(ONG_ID)?)
+    .bind(&seed_user_ids)
+    .execute(pool)
+    .await?;
     sqlx::query("DELETE FROM users WHERE id = ANY($1) OR email::text LIKE 'rescue_fanout_test+%@helpin.local'")
         .bind(&seed_user_ids)
         .execute(pool)
@@ -357,10 +472,10 @@ async fn upsert_post(pool: &PgPool) -> anyhow::Result<()> {
           geo_status, geo_source, route_public, geo_provider, geo_confidence, geo_resolved_at
         )
         VALUES (
-          $1, $2, 'emergency'::post_type, 'dog', 'Cachorro seed em emergencia', '', '',
+          $1, $2, 'emergency'::post_type, 'dog', '[seed rescue] cachorro ferido proximo', '', '',
           'Seed operacional: animal ferido para validar fanout, push, resposta, chat e status.',
           $3, $4, 'Avenida Paulista, Bela Vista, Sao Paulo, SP', 'Bela Vista', '',
-          ARRAY[$5]::text[], true, 'active', true, 'approved', 0,
+          ARRAY[$5, $6]::text[], true, 'active', true, 'approved', 0,
           'confirmed', 'gps_confirmed', true, 'device', 1.0, now()
         )
         ON CONFLICT (id) DO UPDATE SET
@@ -381,6 +496,7 @@ async fn upsert_post(pool: &PgPool) -> anyhow::Result<()> {
     .bind(BASE_LAT)
     .bind(BASE_LNG)
     .bind(SEED_TAG)
+    .bind(format!("#{SEED_TAG}"))
     .execute(pool)
     .await?;
     Ok(())
@@ -447,36 +563,77 @@ async fn report(pool: &PgPool) -> anyhow::Result<()> {
         SELECT
           u.email::text AS email,
           u.account_type::text AS account_type,
+          u.verified,
           ps.push_token,
-          round((6371 * acos(
-            cos(radians($2)) * cos(radians(ps.lat)) *
-            cos(radians(ps.lng) - radians($3)) +
-            sin(radians($2)) * sin(radians(ps.lat))
-          ))::numeric, 3)::text AS distance_km,
+          CASE
+            WHEN ps.user_id IS NULL THEN NULL
+            ELSE round((6371 * acos(
+              LEAST(1, GREATEST(-1,
+                cos(radians($2)) * cos(radians(ps.lat)) *
+                cos(radians(ps.lng) - radians($3)) +
+                sin(radians($2)) * sin(radians(ps.lat))
+              ))
+            ))::numeric, 3)::text
+          END AS distance_km,
           ps.radius_km,
-          ps.invalidated_at IS NULL AS active
-        FROM push_subscriptions ps
-        JOIN users u ON u.id = ps.user_id
-        WHERE ps.user_id = ANY($1)
-        ORDER BY distance_km ASC
+          COALESCE(ps.invalidated_at IS NULL, false) AS active,
+          CASE
+            WHEN ps.user_id IS NULL THEN 'no_push_token'
+            WHEN (6371 * acos(LEAST(1, GREATEST(-1,
+              cos(radians($2)) * cos(radians(ps.lat)) *
+              cos(radians(ps.lng) - radians($3)) +
+              sin(radians($2)) * sin(radians(ps.lat))
+            )))) <= 0.3 THEN 'phase_1_should_receive'
+            WHEN (6371 * acos(LEAST(1, GREATEST(-1,
+              cos(radians($2)) * cos(radians(ps.lat)) *
+              cos(radians(ps.lng) - radians($3)) +
+              sin(radians($2)) * sin(radians(ps.lat))
+            )))) <= 0.7 THEN 'phase_2_should_receive'
+            WHEN (6371 * acos(LEAST(1, GREATEST(-1,
+              cos(radians($2)) * cos(radians(ps.lat)) *
+              cos(radians(ps.lng) - radians($3)) +
+              sin(radians($2)) * sin(radians(ps.lat))
+            )))) <= 1.0 THEN 'phase_3_should_receive'
+            WHEN u.account_type::text = 'ong' OR u.verified = true THEN 'later_or_verified_escalation'
+            ELSE 'should_not_receive_initially'
+          END AS expected
+        FROM users u
+        LEFT JOIN push_subscriptions ps ON ps.user_id = u.id
+        WHERE u.id = ANY($1)
+          AND u.id <> $4
+        ORDER BY ps.user_id IS NULL, distance_km NULLS LAST, email ASC
         "#,
     )
     .bind(&seed_user_ids()?)
     .bind(BASE_LAT)
     .bind(BASE_LNG)
+    .bind(Uuid::parse_str(AUTHOR_ID)?)
     .fetch_all(pool)
     .await?;
 
     println!("candidates:");
     for row in rows {
+        let token = row
+            .get::<Option<String>, _>("push_token")
+            .map(|value| mask_token(&value))
+            .unwrap_or_else(|| "none".to_string());
+        let distance = row
+            .get::<Option<String>, _>("distance_km")
+            .unwrap_or_else(|| "none".to_string());
+        let radius = row
+            .get::<Option<f64>, _>("radius_km")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string());
         println!(
-            "- {} type={} distance_km={} radius_km={} active={} token={}",
+            "- {} type={} verified={} distance_km={} radius_km={} active={} expected={} token={}",
             row.get::<String, _>("email"),
             row.get::<String, _>("account_type"),
-            row.get::<String, _>("distance_km"),
-            row.get::<f64, _>("radius_km"),
+            row.get::<bool, _>("verified"),
+            distance,
+            radius,
             row.get::<bool, _>("active"),
-            mask_token(&row.get::<String, _>("push_token"))
+            row.get::<String, _>("expected"),
+            token
         );
     }
 
@@ -509,6 +666,22 @@ async fn report(pool: &PgPool) -> anyhow::Result<()> {
     )
     .await?;
     print_count(pool, "push_delivery_jobs", "SELECT count(*)::bigint FROM push_delivery_jobs WHERE notification_event_id IN (SELECT id FROM notification_events WHERE post_id = $1)", POST_ID).await?;
+    print_job_statuses(pool).await?;
+    print_pipeline_timings(pool).await?;
+    print_count(
+        pool,
+        "rescue_responses",
+        "SELECT count(*)::bigint FROM rescue_responses WHERE post_id = $1",
+        post_id,
+    )
+    .await?;
+    print_count(
+        pool,
+        "chat_rooms_for_post",
+        "SELECT count(*)::bigint FROM chat_rooms WHERE post_id = $1",
+        post_id,
+    )
+    .await?;
 
     let jobs = sqlx::query(
         r#"
@@ -555,6 +728,188 @@ async fn report(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn simulate_response_and_chat(pool: &PgPool) -> anyhow::Result<()> {
+    let post_id = Uuid::parse_str(POST_ID)?;
+    let rescue_id = Uuid::parse_str(RESCUE_ID)?;
+    let near_id = Uuid::parse_str(NEAR_100_ID)?;
+    let author_id = Uuid::parse_str(AUTHOR_ID)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO rescue_responses (
+          rescue_session_id, post_id, user_id, action, status, lat, lng, eta_seconds
+        )
+        VALUES ($1, $2, $3, 'going', 'confirmed', $4, $5, 360)
+        ON CONFLICT (post_id, user_id, action) DO UPDATE SET
+          rescue_session_id = EXCLUDED.rescue_session_id,
+          status = 'confirmed',
+          lat = EXCLUDED.lat,
+          lng = EXCLUDED.lng,
+          eta_seconds = EXCLUDED.eta_seconds,
+          updated_at = now()
+        "#,
+    )
+    .bind(rescue_id)
+    .bind(post_id)
+    .bind(near_id)
+    .bind(BASE_LAT + 0.0009)
+    .bind(BASE_LNG)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE rescue_fanout_states
+        SET status = 'paused',
+            confirmed_count = (
+              SELECT count(*)::int
+              FROM rescue_responses
+              WHERE post_id = $1 AND action = 'going' AND status IN ('confirmed', 'arrived')
+            ),
+            arrived_count = (
+              SELECT count(*)::int
+              FROM rescue_responses
+              WHERE post_id = $1 AND action = 'going' AND status = 'arrived'
+            ),
+            updated_at = now()
+        WHERE post_id = $1
+        "#,
+    )
+    .bind(post_id)
+    .execute(pool)
+    .await?;
+
+    let room_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO chat_rooms (post_id, requester_id)
+        VALUES ($1, $2)
+        ON CONFLICT (post_id, requester_id)
+          WHERE post_id IS NOT NULL AND requester_id IS NOT NULL
+        DO UPDATE SET requester_id = EXCLUDED.requester_id
+        RETURNING id
+        "#,
+    )
+    .bind(post_id)
+    .bind(near_id)
+    .fetch_one(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_room_members (room_id, user_id)
+        VALUES ($1, $2), ($1, $3)
+        ON CONFLICT (room_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(room_id)
+    .bind(near_id)
+    .bind(author_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_messages (room_id, sender_id, body, idempotency_key)
+        VALUES ($1, $2, 'Seed operacional: estou perto e posso ajudar.', $3)
+        ON CONFLICT (room_id, sender_id, idempotency_key) DO NOTHING
+        "#,
+    )
+    .bind(room_id)
+    .bind(near_id)
+    .bind(SEED_TAG)
+    .execute(pool)
+    .await?;
+
+    println!("simulate_response_and_chat: ok room_id={room_id}");
+    Ok(())
+}
+
+async fn print_job_statuses(pool: &PgPool) -> anyhow::Result<()> {
+    let rows = sqlx::query(
+        r#"
+        SELECT j.status, count(*)::bigint AS total
+        FROM push_delivery_jobs j
+        JOIN notification_events ne ON ne.id = j.notification_event_id
+        WHERE ne.post_id = $1
+        GROUP BY j.status
+        ORDER BY j.status
+        "#,
+    )
+    .bind(POST_ID)
+    .fetch_all(pool)
+    .await?;
+
+    println!("job_statuses:");
+    if rows.is_empty() {
+        println!("- none");
+    }
+    for row in rows {
+        println!(
+            "- {}: {}",
+            row.get::<String, _>("status"),
+            row.get::<i64, _>("total")
+        );
+    }
+    Ok(())
+}
+
+async fn print_pipeline_timings(pool: &PgPool) -> anyhow::Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+          p.created_at AS post_created_at,
+          min(j.created_at) AS first_job_created_at,
+          min(j.provider_accepted_at) AS first_provider_accepted_at,
+          min(j.delivered_at) AS first_delivered_at
+        FROM posts p
+        LEFT JOIN notification_events ne ON ne.post_id = p.id::text
+        LEFT JOIN push_delivery_jobs j ON j.notification_event_id = ne.id
+        WHERE p.id = $1
+        GROUP BY p.created_at
+        "#,
+    )
+    .bind(Uuid::parse_str(POST_ID)?)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        println!("pipeline_timings: post not found");
+        return Ok(());
+    };
+
+    let post_created_at = row.get::<chrono::DateTime<chrono::Utc>, _>("post_created_at");
+    let first_job_created_at =
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("first_job_created_at");
+    let first_provider_accepted_at =
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("first_provider_accepted_at");
+    let first_delivered_at =
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("first_delivered_at");
+
+    println!("pipeline_timings:");
+    println!("- post_created_at: {}", post_created_at.to_rfc3339());
+    println!(
+        "- post_to_first_job_ms: {}",
+        delta_ms(post_created_at, first_job_created_at)
+    );
+    println!(
+        "- post_to_provider_accepted_ms: {}",
+        delta_ms(post_created_at, first_provider_accepted_at)
+    );
+    println!(
+        "- post_to_receipt_delivered_ms: {}",
+        delta_ms(post_created_at, first_delivered_at)
+    );
+    Ok(())
+}
+
+fn delta_ms(
+    start: chrono::DateTime<chrono::Utc>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    end.map(|value| (value - start).num_milliseconds().to_string())
+        .unwrap_or_else(|| "pending".to_string())
+}
+
 async fn print_count<T>(
     pool: &PgPool,
     label: &str,
@@ -580,8 +935,12 @@ fn hash_password(password: &str) -> anyhow::Result<String> {
 fn seed_user_ids() -> anyhow::Result<Vec<Uuid>> {
     Ok(vec![
         Uuid::parse_str(AUTHOR_ID)?,
-        Uuid::parse_str(NEAR_ID)?,
-        Uuid::parse_str(FAR_ID)?,
+        Uuid::parse_str(NEAR_100_ID)?,
+        Uuid::parse_str(NEAR_500_ID)?,
+        Uuid::parse_str(NEAR_900_ID)?,
+        Uuid::parse_str(FAR_5K_ID)?,
+        Uuid::parse_str(NO_PUSH_ID)?,
+        Uuid::parse_str(INVALID_PUSH_ID)?,
         Uuid::parse_str(ONG_USER_ID)?,
     ])
 }
