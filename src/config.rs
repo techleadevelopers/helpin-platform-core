@@ -2,9 +2,58 @@ use std::env;
 
 use anyhow::Context;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessRole {
+    All,
+    Api,
+    Workers,
+    PushWorker,
+    GeocodeWorker,
+    FanoutWorker,
+}
+
+impl ProcessRole {
+    pub fn from_env_value(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "all" => Ok(Self::All),
+            "api" | "web" | "http" => Ok(Self::Api),
+            "workers" | "worker" => Ok(Self::Workers),
+            "push-worker" | "push_worker" | "push" => Ok(Self::PushWorker),
+            "geocode-worker" | "geocode_worker" | "geocode" | "geocoding" => {
+                Ok(Self::GeocodeWorker)
+            }
+            "fanout-worker" | "fanout_worker" | "fanout" => Ok(Self::FanoutWorker),
+            other => anyhow::bail!(
+                "PROCESS_ROLE must be all, api, workers, push-worker, geocode-worker, or fanout-worker; got {other}"
+            ),
+        }
+    }
+
+    pub fn serves_http(self) -> bool {
+        matches!(self, Self::All | Self::Api)
+    }
+
+    pub fn starts_push_worker(self) -> bool {
+        matches!(self, Self::All | Self::Workers | Self::PushWorker)
+    }
+
+    pub fn starts_geocode_worker(self) -> bool {
+        matches!(self, Self::All | Self::Workers | Self::GeocodeWorker)
+    }
+
+    pub fn starts_fanout_worker(self) -> bool {
+        matches!(self, Self::All | Self::Workers | Self::FanoutWorker)
+    }
+
+    pub fn starts_realtime_bridge(self) -> bool {
+        self.serves_http()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub app_env: String,
+    pub process_role: ProcessRole,
     pub bind_addr: String,
     pub database_url: String,
     pub database_max_connections: u32,
@@ -51,6 +100,9 @@ impl Config {
             app_env: env::var("APP_ENV")
                 .or_else(|_| env::var("RUST_ENV"))
                 .unwrap_or_else(|_| "development".to_string()),
+            process_role: ProcessRole::from_env_value(
+                &env::var("PROCESS_ROLE").unwrap_or_else(|_| "all".to_string()),
+            )?,
             bind_addr: env::var("PORT")
                 .map(|port| format!("0.0.0.0:{port}"))
                 .or_else(|_| env::var("BIND_ADDR"))
@@ -197,14 +249,18 @@ impl Config {
             !self.nats_url.trim().is_empty(),
             "NATS_URL is required outside development"
         );
-        anyhow::ensure!(
-            self.push_worker_enabled,
-            "PUSH_WORKER_ENABLED=true is required outside development"
-        );
-        anyhow::ensure!(
-            self.rescue_fanout_worker_enabled,
-            "RESCUE_FANOUT_WORKER_ENABLED=true is required outside development"
-        );
+        if self.process_role.starts_push_worker() {
+            anyhow::ensure!(
+                self.push_worker_enabled,
+                "PUSH_WORKER_ENABLED=true is required outside development when PROCESS_ROLE starts push delivery"
+            );
+        }
+        if self.process_role.starts_fanout_worker() {
+            anyhow::ensure!(
+                self.rescue_fanout_worker_enabled,
+                "RESCUE_FANOUT_WORKER_ENABLED=true is required outside development when PROCESS_ROLE starts fanout"
+            );
+        }
         let geocoding_provider = self
             .geocoding_api_provider
             .as_deref()
