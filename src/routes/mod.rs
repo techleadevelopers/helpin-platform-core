@@ -20,6 +20,8 @@ mod feed;
 mod geo;
 #[path = "platform/health.rs"]
 mod health;
+#[path = "platform/impact.rs"]
+mod impact;
 #[path = "geo/maps.rs"]
 pub(crate) mod maps;
 #[path = "content/marketplace.rs"]
@@ -54,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(observability::metrics))
         .route("/v1/observability", get(observability::status))
+        .route("/v1/impact/metrics", get(impact::metrics))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/register", post(auth::register))
         .route("/v1/auth/email/verify", get(auth::verify_email))
