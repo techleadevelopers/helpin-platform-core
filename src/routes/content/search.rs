@@ -43,6 +43,7 @@ pub async fn search(
             limit: Some(100),
             before: None,
             liked: None,
+            author_id: None,
         },
         None,
     )
