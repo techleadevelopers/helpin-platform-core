@@ -811,7 +811,9 @@ async fn simulate_response_and_chat(pool: &PgPool) -> anyhow::Result<()> {
         r#"
         INSERT INTO chat_messages (room_id, sender_id, body, idempotency_key)
         VALUES ($1, $2, 'Seed operacional: estou perto e posso ajudar.', $3)
-        ON CONFLICT (room_id, sender_id, idempotency_key) DO NOTHING
+        ON CONFLICT (room_id, sender_id, idempotency_key)
+          WHERE idempotency_key IS NOT NULL
+        DO NOTHING
         "#,
     )
     .bind(room_id)
