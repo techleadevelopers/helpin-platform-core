@@ -143,6 +143,7 @@ mod tests {
             rescue_fanout_worker_enabled: false,
             push_provider: "expo".into(),
             expo_access_token: None,
+            log_push_tokens: false,
             throttle_ttl_seconds: 60,
             throttle_limit: 10,
         };
