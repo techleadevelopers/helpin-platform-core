@@ -243,7 +243,8 @@ async fn check_receipt_chunk(
         let receipt_status = receipt
             .get("status")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            .unwrap_or("unknown")
+            .to_string();
         if receipt_status == "ok" {
             sqlx::query(
                 r#"
@@ -259,7 +260,7 @@ async fn check_receipt_chunk(
                 "#,
             )
             .bind(job.id)
-            .bind(receipt_status)
+            .bind(&receipt_status)
             .bind(receipt)
             .execute(db)
             .await?;
@@ -279,7 +280,7 @@ async fn check_receipt_chunk(
                 "#,
             )
             .bind(job.id)
-            .bind(receipt_status)
+            .bind(&receipt_status)
             .bind(receipt)
             .bind(&message)
             .execute(db)
