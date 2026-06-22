@@ -198,6 +198,23 @@ pub async fn follow_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<FollowUserResponse>, ApiError> {
+    set_follow_user(headers, state, id, true).await
+}
+
+pub async fn unfollow_user(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<FollowUserResponse>, ApiError> {
+    set_follow_user(headers, state, id, false).await
+}
+
+async fn set_follow_user(
+    headers: HeaderMap,
+    state: AppState,
+    id: String,
+    should_follow: bool,
+) -> Result<Json<FollowUserResponse>, ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let follower_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
     let followed_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
@@ -214,18 +231,33 @@ pub async fn follow_user(
         return Err(ApiError::NotFound);
     }
 
-    sqlx::query(
-        r#"
-        INSERT INTO user_follows (follower_id, followed_id)
-        VALUES ($1, $2)
-        ON CONFLICT (follower_id, followed_id)
-        DO UPDATE SET active = NOT user_follows.active, updated_at = now()
-        "#,
-    )
-    .bind(follower_id)
-    .bind(followed_id)
-    .execute(&state.db)
-    .await?;
+    if should_follow {
+        sqlx::query(
+            r#"
+            INSERT INTO user_follows (follower_id, followed_id, active)
+            VALUES ($1, $2, true)
+            ON CONFLICT (follower_id, followed_id)
+            DO UPDATE SET active = true, updated_at = now()
+            "#,
+        )
+        .bind(follower_id)
+        .bind(followed_id)
+        .execute(&state.db)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO user_follows (follower_id, followed_id, active)
+            VALUES ($1, $2, false)
+            ON CONFLICT (follower_id, followed_id)
+            DO UPDATE SET active = false, updated_at = now()
+            "#,
+        )
+        .bind(follower_id)
+        .bind(followed_id)
+        .execute(&state.db)
+        .await?;
+    }
 
     let following: bool = sqlx::query_scalar(
         "SELECT active FROM user_follows WHERE follower_id = $1 AND followed_id = $2",
@@ -398,11 +430,11 @@ async fn load_profile_posts(
             limit: Some(PUBLIC_PROFILE_POST_LIMIT),
             before: None,
             liked: None,
+            author_id: Some(user_id),
         },
         viewer_id,
     )
     .await?;
-    posts.retain(|post| Uuid::parse_str(&post.author.id).ok() == Some(user_id));
     posts.truncate(PUBLIC_PROFILE_POST_LIMIT);
     Ok(posts)
 }
