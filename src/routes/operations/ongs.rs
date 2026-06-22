@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{domain::Ong, error::ApiError, routes::auth::authenticate_request, state::AppState};
+use crate::{
+    domain::Ong, error::ApiError, routes::auth::authenticate_request, services::rate_limit,
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct OngQuery {
@@ -25,16 +28,34 @@ pub struct FollowOngResponse {
 }
 
 pub async fn list_ongs(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<OngQuery>,
 ) -> Result<Json<Vec<Ong>>, ApiError> {
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "ongs:list",
+        60,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     Ok(Json(filter_ongs(query, load_db_ongs(&state).await?)))
 }
 
 pub async fn get_ong(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Ong>, ApiError> {
+    rate_limit::check_ip(
+        &state,
+        &headers,
+        "ongs:get",
+        120,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
     let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     load_db_ong(&state, uuid)
         .await?
@@ -49,6 +70,14 @@ pub async fn follow_ong(
 ) -> Result<Json<FollowOngResponse>, ApiError> {
     let claims = authenticate_request(&state, &headers)?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_user(
+        &state,
+        &user_id.to_string(),
+        "follow:ong",
+        60,
+        std::time::Duration::from_secs(60 * 60),
+    )
+    .await?;
     let ong_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
 
     let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM ong_profiles WHERE id = $1")
