@@ -132,6 +132,7 @@ async fn resolve_post(
         .await?;
         let fanout_state_id =
             rescue_fanout::create_fanout_state_for_post(&state.db, post_id, None).await?;
+        rescue_fanout::wake_fanout_state(state.db.clone(), fanout_state_id);
         tracing::info!(
             %post_id,
             %fanout_state_id,
