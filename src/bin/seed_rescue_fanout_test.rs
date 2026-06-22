@@ -555,7 +555,12 @@ async fn report(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn print_count<T>(pool: &PgPool, label: &str, sql: &str, bind: T) -> anyhow::Result<()>
+async fn print_count<T>(
+    pool: &PgPool,
+    label: &str,
+    sql: &'static str,
+    bind: T,
+) -> anyhow::Result<()>
 where
     T: Send + Sync + 'static + sqlx::Encode<'static, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
