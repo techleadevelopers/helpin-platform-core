@@ -17,7 +17,7 @@ use crate::{
 
 const WORKER_INTERVAL_SECONDS: u64 = 15;
 const CLAIM_BATCH_SIZE: i64 = 20;
-const ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES: i64 = 15;
+const ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES: i64 = 24 * 60;
 const MAX_CANDIDATES_PER_ATTEMPT: usize = 250;
 const MAX_SPECIALIST_CANDIDATES_PER_ATTEMPT: usize = 80;
 const MAX_RECENT_RESCUE_ALERTS_30M: i32 = 3;
@@ -1292,7 +1292,8 @@ async fn ranked_verified_regional_fallback(
         FROM push_subscriptions ps
         JOIN users u ON u.id = ps.user_id
         WHERE u.deleted_at IS NULL
-          AND ps.updated_at > now() - interval '60 minutes'
+          AND ps.invalidated_at IS NULL
+          AND ps.updated_at > now() - ($6::int * interval '1 minute')
           AND ps.lat BETWEEN $1 AND $2
           AND ps.lng BETWEEN $3 AND $4
           AND (u.verified = true OR u.account_type IN ('ong', 'vet', 'admin'))
@@ -1309,6 +1310,7 @@ async fn ranked_verified_regional_fallback(
     .bind(post_lng - lng_delta)
     .bind(post_lng + lng_delta)
     .bind(format!("rescue-escalation:{}:{}", post.id, phase.phase))
+    .bind(ACTIVE_SUBSCRIPTION_MAX_AGE_MINUTES as i32)
     .fetch_all(&mut **tx)
     .await?;
 
