@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures_util::{stream, StreamExt};
 use reqwest::Client;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
@@ -9,6 +10,7 @@ use crate::config::Config;
 
 const MAX_ATTEMPTS: i32 = 5;
 const BATCH_SIZE: i64 = 50;
+const DELIVERY_CONCURRENCY: usize = 10;
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
 
 #[derive(Debug)]
@@ -65,15 +67,23 @@ async fn process_batch(config: &Config, db: &PgPool, client: &Client) -> anyhow:
     .fetch_all(db)
     .await?;
 
-    for row in rows {
-        let job = PushJob {
+    let jobs: Vec<_> = rows
+        .into_iter()
+        .map(|row| PushJob {
             id: row.get("id"),
             attempts: row.get("attempts"),
             push_token: row.get("push_token"),
             payload: row.get("payload"),
-        };
-        deliver_or_defer(config, db, client, job).await?;
-    }
+        })
+        .collect();
+
+    stream::iter(jobs)
+        .for_each_concurrent(DELIVERY_CONCURRENCY, |job| async move {
+            if let Err(error) = deliver_or_defer(config, db, client, job).await {
+                tracing::warn!(?error, "push delivery job failed before deferral");
+            }
+        })
+        .await;
 
     Ok(())
 }
