@@ -203,6 +203,14 @@ pub async fn create_fanout_state_for_post(
     Ok(state_id)
 }
 
+pub fn wake_fanout_state(db: PgPool, state_id: Uuid) {
+    tokio::spawn(async move {
+        if let Err(error) = process_one_fanout(&db, state_id).await {
+            tracing::warn!(?error, %state_id, "immediate rescue fanout dispatch failed");
+        }
+    });
+}
+
 pub async fn upsert_rescue_response(
     db: &PgPool,
     post_id: Uuid,
