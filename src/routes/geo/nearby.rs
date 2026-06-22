@@ -1,5 +1,6 @@
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -7,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::Post,
     error::ApiError,
-    routes::feed::{load_db_posts, FeedQuery},
-    services::geo::haversine_km,
+    routes::{
+        feed::{load_db_posts, FeedQuery},
+        posts::optional_authenticated_user_id,
+    },
+    services::{geo::haversine_km, rate_limit},
     state::AppState,
 };
 
@@ -27,9 +31,16 @@ pub struct NearbyCase {
 }
 
 pub async fn nearby_cases(
+    headers: HeaderMap,
     State(state): State<AppState>,
     Query(query): Query<NearbyQuery>,
 ) -> Result<Json<Vec<NearbyCase>>, ApiError> {
+    let window = std::time::Duration::from_secs(60);
+    if let Some(user_id) = optional_authenticated_user_id(&state, &headers) {
+        rate_limit::check_user(&state, &user_id.to_string(), "nearby", 30, window).await?;
+    } else {
+        rate_limit::check_ip(&state, &headers, "nearby", 20, window).await?;
+    }
     let origin = query
         .lat
         .zip(query.lng)
