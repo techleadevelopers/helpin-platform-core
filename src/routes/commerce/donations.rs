@@ -8,7 +8,9 @@ use sqlx::Row;
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::{error::ApiError, routes::auth::authenticate_request, state::AppState};
+use crate::{
+    error::ApiError, routes::auth::authenticate_request, services::rate_limit, state::AppState,
+};
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +77,14 @@ pub async fn create_intent(
 
     let claims = authenticate_request(&state, &headers)?;
     let donor_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_user(
+        &state,
+        &donor_id.to_string(),
+        "donations:intent",
+        20,
+        std::time::Duration::from_secs(60 * 60),
+    )
+    .await?;
     let ong_id = Uuid::parse_str(&payload.ong_id).map_err(|_| ApiError::NotFound)?;
     let idempotency_key = headers
         .get("idempotency-key")
@@ -160,6 +170,14 @@ pub async fn create_maintenance_intent(
 
     let claims = authenticate_request(&state, &headers)?;
     let donor_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    rate_limit::check_user(
+        &state,
+        &donor_id.to_string(),
+        "contributions:maintenance",
+        20,
+        std::time::Duration::from_secs(60 * 60),
+    )
+    .await?;
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
