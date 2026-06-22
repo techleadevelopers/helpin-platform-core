@@ -724,7 +724,8 @@ pub async fn queue_status(
     let waiting = count_push_jobs(&state, "queued").await?;
     let failed =
         count_push_jobs(&state, "failed").await? + count_push_jobs(&state, "dead_letter").await?;
-    let completed = count_push_jobs(&state, "sent").await?;
+    let completed = count_push_jobs(&state, "provider_accepted").await?
+        + count_push_jobs(&state, "delivered").await?;
     let delayed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM push_delivery_jobs WHERE status IN ('queued', 'failed') AND next_attempt_at > now()",
     )
@@ -754,7 +755,7 @@ pub async fn queue_jobs(
     let status_filter = query.get("status").and_then(|value| match value.as_str() {
         "waiting" => Some(vec!["queued"]),
         "failed" => Some(vec!["failed", "dead_letter"]),
-        "completed" => Some(vec!["sent"]),
+        "completed" => Some(vec!["provider_accepted", "delivered"]),
         "delayed" => Some(vec!["queued", "failed"]),
         "active" => Some(Vec::new()),
         _ => None,
@@ -1145,7 +1146,7 @@ fn row_to_rescue_final_report_admin(row: sqlx::postgres::PgRow) -> RescueFinalRe
 
 fn row_to_queue_job(row: sqlx::postgres::PgRow) -> QueueJob {
     let status: String = row.get("status");
-    let finished_at = if status == "sent" {
+    let finished_at = if matches!(status, "provider_accepted" | "delivered") {
         Some(row.get("updated_at"))
     } else {
         None
@@ -1156,12 +1157,16 @@ fn row_to_queue_job(row: sqlx::postgres::PgRow) -> QueueJob {
         data: row.get("payload"),
         status: match status.as_str() {
             "queued" => "waiting",
-            "sent" => "completed",
+            "provider_accepted" | "delivered" => "completed",
             "failed" | "dead_letter" => "failed",
             _ => status.as_str(),
         }
         .into(),
-        progress: if status == "sent" { 100 } else { 0 },
+        progress: if matches!(status, "provider_accepted" | "delivered") {
+            100
+        } else {
+            0
+        },
         attempts_made: row.get("attempts"),
         failed_reason: row.get("last_error"),
         created_at: row.get("created_at"),
