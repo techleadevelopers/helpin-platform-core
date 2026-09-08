@@ -415,7 +415,10 @@ pub async fn create_post(
     rate_limit::check_key(
         &state,
         &format!("posts:create:{author_id}"),
-        state.config.throttle_limit,
+        // Publishing a post performs multiple legitimate client-side steps
+        // (media intents, retries and an idempotent create). Keep an abuse
+        // guard without rejecting ordinary retries as a rate-limit failure.
+        state.config.throttle_limit * 3,
         StdDuration::from_secs(state.config.throttle_ttl_seconds),
     )
     .await?;
@@ -496,9 +499,9 @@ pub async fn create_post(
     rate_limit::check_duplicate_text(
         &state,
         &author_id.to_string(),
-        "posts:create",
+        "posts:create:v2",
         &description,
-        StdDuration::from_secs(15 * 60),
+        StdDuration::from_secs(2 * 60),
     )
     .await?;
 

@@ -1240,7 +1240,7 @@ async fn validate_owned_avatar_url(
             "avatarUrl must be a Helpin Cloudinary image".into(),
         ));
     }
-    let owned = if let Some(upload_id) = upload_id {
+    let owned: bool = if let Some(upload_id) = upload_id {
         sqlx::query_scalar(
             r#"
             SELECT EXISTS(
