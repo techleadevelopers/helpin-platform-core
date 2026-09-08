@@ -122,6 +122,7 @@ pub struct ActionQueuedResponse {
 pub struct UpdateAvatarRequest {
     #[validate(url)]
     pub avatar_url: String,
+    pub upload_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -562,7 +563,7 @@ pub async fn update_avatar(
         StdDuration::from_secs(state.config.throttle_ttl_seconds),
     )
     .await?;
-    validate_owned_avatar_url(&state, user_id, &payload.avatar_url).await?;
+    validate_owned_avatar_url(&state, user_id, &payload.avatar_url, payload.upload_id).await?;
 
     sqlx::query("UPDATE users SET avatar_url = $1 WHERE id = $2")
         .bind(&payload.avatar_url)
@@ -1228,6 +1229,7 @@ async fn validate_owned_avatar_url(
     state: &AppState,
     user_id: Uuid,
     avatar_url: &str,
+    upload_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     let expected_prefix = format!(
         "https://res.cloudinary.com/{}/image/upload/",
@@ -1238,21 +1240,38 @@ async fn validate_owned_avatar_url(
             "avatarUrl must be a Helpin Cloudinary image".into(),
         ));
     }
-    if !(avatar_url.contains("/zoohelp/profile-avatars/image/")
-        || avatar_url.contains("/zoohelp/ong-logos/image/"))
-    {
-        return Err(ApiError::Validation(
-            "avatarUrl purpose is not allowed".into(),
-        ));
-    }
-
-    let owned: bool = sqlx::query_scalar(
+    let owned = if let Some(upload_id) = upload_id {
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+              SELECT 1 FROM media_upload_intents
+              WHERE id = $1
+                AND user_id = $2
+                AND resource_type = 'image'
+                AND expires_at > now() - interval '1 day'
+                AND (
+                  object_key LIKE 'zoohelp/profile-avatars/image/%'
+                  OR object_key LIKE 'zoohelp/ong-logos/image/%'
+                )
+            )
+            "#,
+        )
+        .bind(upload_id)
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?
+    } else {
+        sqlx::query_scalar(
         r#"
         SELECT EXISTS(
           SELECT 1 FROM media_upload_intents
           WHERE user_id = $1
             AND resource_type = 'image'
             AND expires_at > now() - interval '1 day'
+            AND (
+              object_key LIKE 'zoohelp/profile-avatars/image/%'
+              OR object_key LIKE 'zoohelp/ong-logos/image/%'
+            )
             AND (
               public_url = $2
               OR $2 LIKE '%' || object_key || '%'
@@ -1263,7 +1282,8 @@ async fn validate_owned_avatar_url(
     .bind(user_id)
     .bind(avatar_url)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    };
     if !owned {
         return Err(ApiError::Validation(
             "avatarUrl must come from an upload intent owned by this user".into(),

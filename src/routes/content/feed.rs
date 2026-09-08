@@ -192,7 +192,11 @@ pub(crate) async fn load_db_posts(
             ) = $9)
           )
         ORDER BY (
-          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1000.0 ELSE 0.0 END
+          -- A signed-in user's own posts must remain visible after the feed is
+          -- refreshed, even when the global ranked window has more than `limit`
+          -- higher-scoring cases.
+          CASE WHEN $8::uuid IS NOT NULL AND p.author_id = $8 THEN 10000.0 ELSE 0.0 END
+          + CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1000.0 ELSE 0.0 END
           + CASE p.post_type::text
               WHEN 'emergency' THEN 500.0 WHEN 'lost' THEN 350.0 WHEN 'found' THEN 250.0
               WHEN 'adoption' THEN 180.0 WHEN 'campaign' THEN 120.0 ELSE 40.0 END
@@ -281,7 +285,9 @@ pub(crate) async fn load_db_posts(
             ) = $9)
           )
         ORDER BY (
-          CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1000.0 ELSE 0.0 END
+          -- Keep the authenticated author's posts in the bounded feed result.
+          CASE WHEN $8::uuid IS NOT NULL AND p.author_id = $8 THEN 10000.0 ELSE 0.0 END
+          + CASE WHEN p.urgent AND p.rescue_status <> 'resolved' THEN 1000.0 ELSE 0.0 END
           + CASE p.post_type::text
               WHEN 'emergency' THEN 500.0 WHEN 'lost' THEN 350.0 WHEN 'found' THEN 250.0
               WHEN 'adoption' THEN 180.0 WHEN 'campaign' THEN 120.0 ELSE 40.0 END
