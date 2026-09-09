@@ -1339,7 +1339,13 @@ pub(crate) async fn load_post_by_id(
         INNER JOIN users u ON u.id = p.author_id
         LEFT JOIN rescue_fanout_states fs ON fs.post_id = p.id
         WHERE p.id = $1
-          AND p.moderation_status = 'approved'
+          AND (
+            p.moderation_status = 'approved'
+            -- The author can reopen their own non-rejected post, including a
+            -- legacy post awaiting moderation. Other users only see approved
+            -- posts.
+            OR ($2::uuid IS NOT NULL AND p.author_id = $2 AND p.moderation_status <> 'rejected')
+          )
           AND u.deleted_at IS NULL
         "#,
     )

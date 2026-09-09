@@ -167,7 +167,17 @@ pub(crate) async fn load_db_posts(
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
         LEFT JOIN rescue_fanout_states fs ON fs.post_id = p.id
-        WHERE p.moderation_status = 'approved'
+        WHERE (
+            p.moderation_status = 'approved'
+            -- A post must never vanish for its authenticated author merely
+            -- because an older deployment left it queued/needs_review. It is
+            -- still withheld from every other feed until approved.
+            OR (
+                $8::uuid IS NOT NULL
+                AND p.author_id = $8
+                AND p.moderation_status <> 'rejected'
+            )
+        )
           AND u.deleted_at IS NULL
           AND ($1::post_type IS NULL OR p.post_type = $1::post_type)
           AND ($2::account_type IS NULL OR u.account_type = $2::account_type)
@@ -260,7 +270,16 @@ pub(crate) async fn load_db_posts(
         FROM posts p
         INNER JOIN users u ON u.id = p.author_id
         LEFT JOIN rescue_fanout_states fs ON fs.post_id = p.id
-        WHERE p.moderation_status = 'approved'
+        WHERE (
+            p.moderation_status = 'approved'
+            -- Keep non-rejected legacy/unscored posts visible to their owner;
+            -- ranking determines order only, never visibility.
+            OR (
+                $8::uuid IS NOT NULL
+                AND p.author_id = $8
+                AND p.moderation_status <> 'rejected'
+            )
+        )
           AND u.deleted_at IS NULL
           AND ($1::post_type IS NULL OR p.post_type = $1::post_type)
           AND ($2::account_type IS NULL OR u.account_type = $2::account_type)

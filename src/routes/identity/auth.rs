@@ -1249,6 +1249,13 @@ async fn validate_owned_avatar_url(
                 AND user_id = $2
                 AND resource_type = 'image'
                 AND expires_at > now() - interval '1 day'
+                -- Cloudinary normally returns secure_url with /v{version}/.
+                -- Accept that representation as well, but only for this exact
+                -- intent's object key (not merely any URL owned by the user).
+                AND (
+                  public_url = $3
+                  OR $3 LIKE replace(public_url, '/image/upload/', '/image/upload/v%')
+                )
                 AND (
                   object_key LIKE 'zoohelp/profile-avatars/image/%'
                   OR object_key LIKE 'zoohelp/ong-logos/image/%'
@@ -1258,6 +1265,7 @@ async fn validate_owned_avatar_url(
         )
         .bind(upload_id)
         .bind(user_id)
+        .bind(avatar_url)
         .fetch_one(&state.db)
         .await?
     } else {
