@@ -293,10 +293,11 @@ pub async fn refresh(
     let access_token = auth_service::issue_access_token(&state.config, &record.id.to_string(), &record.email, record.account_type.clone())
         .map_err(|error| { tracing::error!(?error, "jwt issue failed during refresh"); ApiError::Internal })?;
     let stats = user_stats(&state, record.id).await.unwrap_or_default();
+    let profile_address = profile_address_from_record(&record);
     audit_event(&state, Some(user_id), "auth.refresh", serde_json::json!({})).await;
     Ok(Json(auth_response(
         &record.id.to_string(), &record.name, &record.email, record.avatar.as_deref(), record.account_type,
-        record.verified, record.gender, profile_address_from_record(&record), ong_record, stats, access_token, replacement,
+        record.verified, record.gender, profile_address, ong_record, stats, access_token, replacement,
     )))
 }
 
