@@ -569,6 +569,7 @@ pub async fn create_post(
             CASE WHEN $19 = 'confirmed' THEN 1.0 ELSE NULL END,
             CASE WHEN $19 = 'confirmed' THEN now() ELSE NULL END
         )
+        ON CONFLICT (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
         RETURNING id
         "#
     } else {
@@ -586,11 +587,12 @@ pub async fn create_post(
             CASE WHEN $19 = 'confirmed' THEN 1.0 ELSE NULL END,
             CASE WHEN $19 = 'confirmed' THEN now() ELSE NULL END
         )
+        ON CONFLICT (author_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
         RETURNING id
         "#
     };
 
-    let post_id: Uuid = sqlx::query_scalar(insert_sql)
+    let post_id: Option<Uuid> = sqlx::query_scalar(insert_sql)
         .bind(author_id)
         .bind(post_type_as_str(&post_type))
         .bind(animal_type_as_str(&payload.animal_type))
@@ -612,8 +614,38 @@ pub async fn create_post(
         .bind(geo_status)
         .bind(geo_source)
         .bind(route_public)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+
+    let Some(post_id) = post_id else {
+        // Another request with this key committed while this request was
+        // validating media. Roll back the intent consumption, then replay the
+        // canonical post instead of leaking a unique-constraint 500.
+        tx.rollback().await?;
+        let key = idempotency_key.ok_or(ApiError::Internal)?;
+        let existing_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM posts WHERE author_id = $1 AND idempotency_key = $2",
+        )
+        .bind(author_id)
+        .bind(key)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::Internal)?;
+        let post = load_post_by_id(&state, existing_id, None)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        return Ok((
+            StatusCode::OK,
+            Json(CreatePostResponse {
+                post,
+                media: Vec::new(),
+                moderation_status: "approved",
+                fraud_risk: 0,
+                rescue_alert: None,
+                rescue_fanout_state_id: None,
+            }),
+        ));
+    };
 
     if resolved_location.enqueue_geocode {
         sqlx::query(
