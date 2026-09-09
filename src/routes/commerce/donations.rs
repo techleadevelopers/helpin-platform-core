@@ -331,26 +331,6 @@ pub async fn payment_webhook(
     }))
 }
 
-async fn find_existing_intent(
-    state: &AppState,
-    donor_id: Uuid,
-    idempotency_key: &str,
-) -> Result<Option<DonationIntentResponse>, ApiError> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, ong_id, amount_cents, currency, purpose, recurrence, status
-        FROM donations
-        WHERE donor_id = $1 AND idempotency_key = $2
-        "#,
-    )
-    .bind(donor_id)
-    .bind(idempotency_key)
-    .fetch_optional(&state.db)
-    .await?;
-
-    Ok(row.map(row_to_response))
-}
-
 fn row_to_response(row: sqlx::postgres::PgRow) -> DonationIntentResponse {
     DonationIntentResponse {
         id: row.get::<Uuid, _>("id").to_string(),

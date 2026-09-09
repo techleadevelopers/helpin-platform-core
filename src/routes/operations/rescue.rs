@@ -334,7 +334,7 @@ pub async fn trigger(
     .fetch_one(&mut *tx)
     .await?;
 
-    let rescue = row_to_rescue(row);
+    let rescue = row_to_rescue(updated);
     insert_location_point(&mut tx, &rescue.id, rescue.lat, rescue.lng, rescue.accuracy).await?;
     if let Ok(post_id) = Uuid::parse_str(&rescue.post_id) {
         sqlx::query(
