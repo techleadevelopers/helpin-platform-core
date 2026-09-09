@@ -25,6 +25,13 @@ pub struct LoginRequest {
     #[validate(length(min = 6))]
     pub password: String,
 }
+
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshRequest {
+    #[validate(length(min = 32, max = 512))]
+    pub refresh_token: String,
+}
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterRequest {
@@ -249,6 +256,48 @@ pub async fn login(
             Err(ApiError::ServiceUnavailable)
         }
     }
+}
+
+/// Replaces the supplied refresh token atomically. A token can be used only
+/// once, so a timeout retry returns Unauthorized instead of extending two
+/// independent sessions.
+pub async fn refresh(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    payload.validate().map_err(|error| ApiError::Validation(error.to_string()))?;
+    rate_limit::check_ip(&state, &headers, "auth:refresh", 30, StdDuration::from_secs(60)).await?;
+
+    let mut tx = state.db.begin().await?;
+    let row = sqlx::query(
+        "SELECT rt.user_id FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id \
+         WHERE rt.token = $1 AND rt.revoked_at IS NULL AND rt.expires_at > now() \
+         AND u.deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(payload.refresh_token.trim())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else { return Err(ApiError::Unauthorized); };
+    let user_id: Uuid = row.get("user_id");
+    let replacement = auth_service::new_refresh_token();
+    let expires_at = Utc::now() + Duration::days(state.config.refresh_token_ttl_days);
+    sqlx::query("UPDATE refresh_tokens SET revoked_at = now() WHERE token = $1 AND revoked_at IS NULL")
+        .bind(payload.refresh_token.trim()).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)")
+        .bind(&replacement).bind(user_id).bind(expires_at).execute(&mut *tx).await?;
+    tx.commit().await?;
+
+    let record = find_user_by_id(&state, user_id).await?.ok_or(ApiError::Unauthorized)?;
+    let ong_record = if matches!(record.account_type, AccountType::Ong) { find_ong_by_user_id(&state, user_id).await? } else { None };
+    let access_token = auth_service::issue_access_token(&state.config, &record.id.to_string(), &record.email, record.account_type.clone())
+        .map_err(|error| { tracing::error!(?error, "jwt issue failed during refresh"); ApiError::Internal })?;
+    let stats = user_stats(&state, record.id).await.unwrap_or_default();
+    audit_event(&state, Some(user_id), "auth.refresh", serde_json::json!({})).await;
+    Ok(Json(auth_response(
+        &record.id.to_string(), &record.name, &record.email, record.avatar.as_deref(), record.account_type,
+        record.verified, record.gender, profile_address_from_record(&record), ong_record, stats, access_token, replacement,
+    )))
 }
 
 pub async fn register(

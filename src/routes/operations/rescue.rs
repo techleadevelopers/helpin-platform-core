@@ -299,6 +299,25 @@ pub async fn trigger(
     let (latitude, longitude) = confirmed_location.ok_or(ApiError::Forbidden)?;
 
     let mut tx = state.db.begin().await?;
+    // Serialize starts for this reporter/case even when a client retries after
+    // losing the response.  A partial unique index backs this up at schema
+    // level; the advisory lock lets us return the canonical active session.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("rescue:{reporter_user_id}:{post_id}"))
+        .execute(&mut *tx)
+        .await?;
+    if let Some(existing) = sqlx::query(
+        "SELECT id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at \
+         FROM rescue_sessions WHERE post_id = $1 AND reporter_user_id = $2 AND status = 'active' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(post_id)
+    .bind(reporter_user_id)
+    .fetch_optional(&mut *tx)
+    .await? {
+        tx.commit().await?;
+        return Ok((StatusCode::OK, Json(RescueResponse { rescue: row_to_rescue(existing) })));
+    }
     let row = sqlx::query(
         r#"
         INSERT INTO rescue_sessions (id, post_id, reporter_user_id, status, lat, lng, accuracy)

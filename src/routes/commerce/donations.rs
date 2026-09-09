@@ -102,12 +102,6 @@ pub async fn create_intent(
         return Err(ApiError::NotFound);
     }
 
-    if let Some(key) = &idempotency_key {
-        if let Some(existing) = find_existing_intent(&state, donor_id, key).await? {
-            return Ok(Json(existing));
-        }
-    }
-
     let provider = &state.config.payment_provider;
     if !state.config.is_development() && provider == "manual_psp_required" {
         return Err(ApiError::ServiceUnavailable);
@@ -122,7 +116,9 @@ pub async fn create_intent(
           status, idempotency_key, purpose, recurrence
         )
         VALUES ($1, $2, $3, $4, $5, $6, 'pending_provider', $7, 'ong_donation', 'one_time')
-        RETURNING id, ong_id, amount_cents, currency, purpose, recurrence, status
+        ON CONFLICT (donor_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+        DO UPDATE SET idempotency_key = donations.idempotency_key
+        RETURNING id, ong_id, amount_cents, currency, purpose, recurrence, status, (xmax = 0) AS inserted
         "#,
     )
     .bind(donor_id)
@@ -136,7 +132,7 @@ pub async fn create_intent(
     .await?;
 
     let donation_id: Uuid = row.get("id");
-    sqlx::query(
+    if row.get::<bool, _>("inserted") { sqlx::query(
         r#"
         INSERT INTO donation_ledger_entries (
           donation_id, entry_type, amount_cents, currency, metadata
@@ -149,7 +145,7 @@ pub async fn create_intent(
     .bind(&currency)
     .bind(serde_json::json!({ "provider": provider, "providerReference": provider_reference }))
     .execute(&mut *tx)
-    .await?;
+    .await?; }
     tx.commit().await?;
 
     Ok(Json(row_to_response(row)))
@@ -184,12 +180,6 @@ pub async fn create_maintenance_intent(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    if let Some(key) = &idempotency_key {
-        if let Some(existing) = find_existing_intent(&state, donor_id, key).await? {
-            return Ok(Json(existing));
-        }
-    }
-
     let provider = &state.config.payment_provider;
     if !state.config.is_development() && provider == "manual_psp_required" {
         return Err(ApiError::ServiceUnavailable);
@@ -211,7 +201,9 @@ pub async fn create_maintenance_intent(
         )
         VALUES ($1, NULL, $2, 'BRL', $3, $4, 'pending_provider', $5,
                 'platform_maintenance', 'monthly', $6)
-        RETURNING id, ong_id, amount_cents, currency, purpose, recurrence, status
+        ON CONFLICT (donor_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+        DO UPDATE SET idempotency_key = donations.idempotency_key
+        RETURNING id, ong_id, amount_cents, currency, purpose, recurrence, status, (xmax = 0) AS inserted
         "#,
     )
     .bind(donor_id)
@@ -224,7 +216,7 @@ pub async fn create_maintenance_intent(
     .await?;
 
     let donation_id: Uuid = row.get("id");
-    sqlx::query(
+    if row.get::<bool, _>("inserted") { sqlx::query(
         r#"
         INSERT INTO donation_ledger_entries (
           donation_id, entry_type, amount_cents, currency, metadata
@@ -240,7 +232,7 @@ pub async fn create_maintenance_intent(
         "copy": maintenance_copy()
     }))
     .execute(&mut *tx)
-    .await?;
+    .await?; }
     tx.commit().await?;
 
     Ok(Json(row_to_response(row)))

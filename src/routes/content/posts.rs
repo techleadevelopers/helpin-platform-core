@@ -1068,18 +1068,27 @@ pub async fn create_comment(
     .await?;
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     ensure_post_exists(&state, post_id).await?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| ApiError::Validation("idempotency-key is required for comments".into()))?;
 
     let mut tx = state.db.begin().await?;
     let row = sqlx::query(
         r#"
-        INSERT INTO post_comments (post_id, user_id, body)
-        VALUES ($1, $2, $3)
+        INSERT INTO post_comments (post_id, user_id, body, idempotency_key)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (post_id, user_id, idempotency_key)
+        DO UPDATE SET body = post_comments.body
         RETURNING id, created_at
         "#,
     )
     .bind(post_id)
     .bind(user_id)
     .bind(&payload.body)
+    .bind(idempotency_key)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(

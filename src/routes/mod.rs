@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/impact/metrics", get(impact::metrics))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/register", post(auth::register))
+        .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/auth/email/verify", get(auth::verify_email))
         .route(
             "/v1/auth/password-reset",
@@ -675,6 +676,7 @@ mod tests {
             .uri(format!("/v1/posts/{TEST_FEED_POST_ID}/comments"))
             .header("authorization", auth)
             .header("content-type", "application/json")
+            .header("idempotency-key", "comment-author-contract-test")
             .body(Body::from(
                 json!({ "body": "Posso ajudar no transporte." }).to_string(),
             ))
