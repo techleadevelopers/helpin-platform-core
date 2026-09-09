@@ -318,7 +318,7 @@ pub async fn trigger(
         tx.commit().await?;
         return Ok((StatusCode::OK, Json(RescueResponse { rescue: row_to_rescue(existing) })));
     }
-    let row = sqlx::query(
+    let updated = sqlx::query(
         r#"
         INSERT INTO rescue_sessions (id, post_id, reporter_user_id, status, lat, lng, accuracy)
         VALUES ($1, $2, $3, 'active', $4, $5, $6)
@@ -463,7 +463,7 @@ pub async fn end(
     )
     .await?;
     let mut tx = state.db.begin().await?;
-    let row = sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE rescue_sessions
         SET status = 'ended',
@@ -479,8 +479,21 @@ pub async fn end(
     .bind(user_id)
     .bind(is_admin)
     .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(ApiError::NotFound)?;
+    .await?;
+    let row = match updated {
+        Some(row) => row,
+        None => sqlx::query(
+            "SELECT id, post_id, reporter_user_id, status, lat, lng, accuracy, created_at, updated_at \
+             FROM rescue_sessions WHERE id = $1 AND status = 'ended' \
+             AND (reporter_user_id = $2 OR $3::boolean = true)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(is_admin)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(ApiError::NotFound)?,
+    };
 
     let rescue = row_to_rescue(row);
     if let Ok(post_id) = Uuid::parse_str(&rescue.post_id) {
