@@ -18,7 +18,7 @@ use crate::{
     routes::auth::audit_event,
     services::notifications::RescueAlert,
     services::rescue_fanout::{
-        create_fanout_state_for_post, upsert_rescue_response, wake_fanout_state,
+        create_fanout_state_for_post, create_fanout_state_for_post_tx, upsert_rescue_response, wake_fanout_state,
         RescueResponseRecord,
     },
     services::{auth as auth_service, fraud, rate_limit},
@@ -634,6 +634,16 @@ pub async fn create_post(
         let post = load_post_by_id(&state, existing_id, None)
             .await?
             .ok_or(ApiError::Internal)?;
+        // Heal records created by versions that committed the post before
+        // writing the fan-out command. This is idempotent because the state
+        // table has UNIQUE(post_id).
+        let rescue_fanout_state_id = if post.rescue_status == "active" {
+            let state_id = create_fanout_state_for_post(&state.db, existing_id, None).await?;
+            wake_fanout_state(state.db.clone(), state_id);
+            Some(state_id.to_string())
+        } else {
+            None
+        };
         return Ok((
             StatusCode::OK,
             Json(CreatePostResponse {
@@ -642,7 +652,7 @@ pub async fn create_post(
                 moderation_status: "approved",
                 fraud_risk: 0,
                 rescue_alert: None,
-                rescue_fanout_state_id: None,
+                rescue_fanout_state_id,
             }),
         ));
     };
@@ -694,6 +704,14 @@ pub async fn create_post(
         persisted.id = media_id.to_string();
         stored_media.push(persisted);
     }
+    // The emergency post and its fan-out command are one business operation.
+    // Do not commit the post first: doing so could leave an active rescue that
+    // is never dispatched if the process/database fails between the two writes.
+    let rescue_fanout_state_id = if geo_ready_for_alert {
+        Some(create_fanout_state_for_post_tx(&mut tx, post_id, None).await?)
+    } else {
+        None
+    };
     tx.commit().await?;
 
     let post = Post {
@@ -734,18 +752,16 @@ pub async fn create_post(
         rescue_final_report: None,
     };
 
-    let rescue_fanout_state_id = if geo_ready_for_alert {
-        let state_id = create_fanout_state_for_post(&state.db, post_id, None).await?;
+    if let Some(state_id) = rescue_fanout_state_id {
+        // This is only a latency optimisation.  The persisted state remains
+        // due and will be claimed by the periodic worker after any crash.
         wake_fanout_state(state.db.clone(), state_id);
         tracing::info!(
             post_id = %post.id,
             fanout_state_id = %state_id,
             "rescue fanout queued"
         );
-        Some(state_id.to_string())
-    } else {
-        None
-    };
+    }
     broadcast_feed_event(&state, &post);
 
     Ok((
@@ -756,7 +772,7 @@ pub async fn create_post(
             moderation_status: "approved",
             fraud_risk: risk,
             rescue_alert: None,
-            rescue_fanout_state_id,
+            rescue_fanout_state_id: rescue_fanout_state_id.map(|id| id.to_string()),
         }),
     ))
 }
@@ -1278,6 +1294,18 @@ pub async fn rescue_response(
 
     let post_id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
     ensure_post_exists(&state, post_id).await?;
+    let rescue_is_actionable = sqlx::query_scalar::<_, bool>(
+        "SELECT urgent OR post_type::text = 'emergency' FROM posts WHERE id = $1",
+    )
+    .bind(post_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(false);
+    if !rescue_is_actionable {
+        return Err(ApiError::Conflict(
+            "rescue responses are only available for urgent emergency posts".into(),
+        ));
+    }
     let rescue_session_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM rescue_sessions WHERE post_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1",
     )

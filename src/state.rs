@@ -14,6 +14,11 @@ use crate::{
     services::{email::EmailService, event_bus::EventBus},
 };
 
+// Schema changes are applied through SQLx's versioned migration ledger.  The
+// legacy idempotent runtime checks below remain only as a compatibility bridge
+// for databases created by earlier preview builds.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
@@ -35,6 +40,7 @@ impl AppState {
             .min_connections(config.database_min_connections)
             .acquire_timeout(Duration::from_secs(5))
             .connect_lazy(&config.database_url)?;
+        MIGRATOR.run(&db).await?;
         ensure_runtime_schema(&db, config.postgis_enabled).await?;
 
         let chat_channels = Arc::new(AsyncMutex::new(HashMap::new()));

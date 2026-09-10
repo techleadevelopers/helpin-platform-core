@@ -175,6 +175,23 @@ pub async fn create_fanout_state_for_post(
     post_id: Uuid,
     rescue_session_id: Option<Uuid>,
 ) -> Result<Uuid, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let state_id = create_fanout_state_for_post_tx(&mut tx, post_id, rescue_session_id).await?;
+    tx.commit().await?;
+    Ok(state_id)
+}
+
+/// Creates the durable fan-out command inside the caller's transaction.
+///
+/// Emergency publication must use this variant so a committed post can never
+/// exist without its corresponding fan-out state.  The pool wrapper above is
+/// retained for administrative and test callers that do not already own a
+/// transaction.
+pub async fn create_fanout_state_for_post_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    post_id: Uuid,
+    rescue_session_id: Option<Uuid>,
+) -> Result<Uuid, sqlx::Error> {
     let phase = FANOUT_PHASES[0];
     let id = Uuid::now_v7();
     let state_id = sqlx::query_scalar(
@@ -198,7 +215,7 @@ pub async fn create_fanout_state_for_post(
     .bind(post_id)
     .bind(rescue_session_id)
     .bind(phase.radius_km)
-    .fetch_one(db)
+    .fetch_one(&mut **tx)
     .await?;
     Ok(state_id)
 }

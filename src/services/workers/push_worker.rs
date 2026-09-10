@@ -39,7 +39,11 @@ pub fn spawn(config: Config, db: PgPool) {
     }
 
     tokio::spawn(async move {
-        let client = Client::new();
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("reqwest push client configuration is valid");
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -107,6 +111,19 @@ async fn deliver_or_defer(
     if matches!(config.push_provider.as_str(), "expo") {
         match send_expo_push(config, client, &job).await {
             Ok(result) => {
+                // Expo accepts a message only when it returns a ticket. Do
+                // not leave a job permanently in provider_accepted when a
+                // malformed/proxy response omitted that durable handle.
+                let Some(provider_ticket_id) = result.provider_ticket_id else {
+                    defer_delivery(
+                        db,
+                        job.id,
+                        job.attempts,
+                        "expo accepted response without a push ticket".to_string(),
+                    )
+                    .await?;
+                    return Ok(());
+                };
                 sqlx::query(
                     r#"
                     UPDATE push_delivery_jobs
@@ -121,7 +138,7 @@ async fn deliver_or_defer(
                 )
                 .bind(job.id)
                 .bind(result.provider_response)
-                .bind(result.provider_ticket_id)
+                .bind(provider_ticket_id)
                 .execute(db)
                 .await?;
                 return Ok(());
@@ -336,6 +353,14 @@ async fn send_expo_push(
         "sound": "default",
         "priority": if critical { "high" } else { "default" },
         "channelId": if critical { "rescue-alerts" } else { "default" },
+        "categoryId": if critical { "rescue" } else { "default" },
+        // This requests a platform-supported time-sensitive interruption;
+        // it deliberately does not impersonate an iOS Critical Alert, which
+        // requires an Apple-approved entitlement.
+        "interruptionLevel": if critical { "timeSensitive" } else { "active" },
+        // A rescue that is no longer actionable must not be delivered hours
+        // later by an offline device. The in-app record remains available.
+        "ttl": if critical { 900 } else { 3600 },
         "data": {
             "deeplink": deeplink,
             "postId": job.payload.get("postId").cloned().unwrap_or(Value::Null),
