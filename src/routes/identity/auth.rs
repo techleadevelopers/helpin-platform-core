@@ -1281,73 +1281,79 @@ async fn validate_owned_avatar_url(
     avatar_url: &str,
     upload_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
-    let expected_prefix = format!(
-        "https://res.cloudinary.com/{}/image/upload/",
-        state.config.cloudinary_cloud_name
-    );
-    if !avatar_url.starts_with(&expected_prefix) {
-        return Err(ApiError::Validation(
-            "avatarUrl must be a Helpin Cloudinary image".into(),
-        ));
-    }
-    let owned: bool = if let Some(upload_id) = upload_id {
+    // Cloudinary's `secure_url` can add a version segment and delivery
+    // transformations before the public ID.  Comparing it directly with the
+    // versionless URL generated when the upload intent was created rejects a
+    // valid upload.  Load only the caller's avatar intents and verify that the
+    // delivered URL still points at that exact public ID.
+    let object_keys: Vec<String> = if let Some(upload_id) = upload_id {
         sqlx::query_scalar(
             r#"
-            SELECT EXISTS(
-              SELECT 1 FROM media_upload_intents
-              WHERE id = $1
-                AND user_id = $2
-                AND resource_type = 'image'
-                AND expires_at > now() - interval '1 day'
-                -- Cloudinary normally returns secure_url with /v{version}/.
-                -- Accept that representation as well, but only for this exact
-                -- intent's object key (not merely any URL owned by the user).
-                AND (
-                  public_url = $3
-                  OR $3 LIKE replace(public_url, '/image/upload/', '/image/upload/v%')
-                )
-                AND (
-                  object_key LIKE 'zoohelp/profile-avatars/image/%'
-                  OR object_key LIKE 'zoohelp/ong-logos/image/%'
-                )
-            )
+            SELECT object_key FROM media_upload_intents
+            WHERE id = $1
+              AND user_id = $2
+              AND resource_type = 'image'
+              AND expires_at > now() - interval '1 day'
+              AND (
+                object_key LIKE 'zoohelp/profile-avatars/image/%'
+                OR object_key LIKE 'zoohelp/ong-logos/image/%'
+              )
             "#,
         )
         .bind(upload_id)
         .bind(user_id)
-        .bind(avatar_url)
-        .fetch_one(&state.db)
+        .fetch_all(&state.db)
         .await?
     } else {
         sqlx::query_scalar(
         r#"
-        SELECT EXISTS(
-          SELECT 1 FROM media_upload_intents
-          WHERE user_id = $1
-            AND resource_type = 'image'
-            AND expires_at > now() - interval '1 day'
-            AND (
-              object_key LIKE 'zoohelp/profile-avatars/image/%'
-              OR object_key LIKE 'zoohelp/ong-logos/image/%'
-            )
-            AND (
-              public_url = $2
-              OR $2 LIKE '%' || object_key || '%'
-            )
-        )
+        SELECT object_key FROM media_upload_intents
+        WHERE user_id = $1
+          AND resource_type = 'image'
+          AND expires_at > now() - interval '1 day'
+          AND (
+            object_key LIKE 'zoohelp/profile-avatars/image/%'
+            OR object_key LIKE 'zoohelp/ong-logos/image/%'
+          )
         "#,
     )
     .bind(user_id)
-    .bind(avatar_url)
-    .fetch_one(&state.db)
+    .fetch_all(&state.db)
     .await?
     };
+    let owned = object_keys.iter().any(|object_key| {
+        is_cloudinary_delivery_url(
+            avatar_url,
+            &state.config.cloudinary_cloud_name,
+            object_key,
+        )
+    });
     if !owned {
         return Err(ApiError::Validation(
             "avatarUrl must come from an upload intent owned by this user".into(),
         ));
     }
     Ok(())
+}
+
+fn is_cloudinary_delivery_url(avatar_url: &str, cloud_name: &str, object_key: &str) -> bool {
+    let expected_prefix = format!(
+        "https://res.cloudinary.com/{cloud_name}/image/upload/"
+    );
+    let Some(delivery_path) = avatar_url.strip_prefix(&expected_prefix) else {
+        // Cloudinary host and cloud names are case-insensitive, while the
+        // public ID itself remains case-sensitive.
+        let url_lower = avatar_url.to_ascii_lowercase();
+        let prefix_lower = expected_prefix.to_ascii_lowercase();
+        let Some(prefix_length) = url_lower.strip_prefix(&prefix_lower).map(str::len) else {
+            return false;
+        };
+        return avatar_url
+            .get(prefix_length..)
+            .is_some_and(|path| path.ends_with(object_key));
+    };
+
+    delivery_path.ends_with(object_key)
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
@@ -1472,4 +1478,39 @@ fn fallback_ong_record(payload: &RegisterRequest, account_type: &AccountType) ->
         foundation_year: payload.foundation_year,
         verification_status: "PENDING_MANUAL_REVIEW".into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_cloudinary_delivery_url;
+
+    const CLOUD_NAME: &str = "limpeja";
+    const OBJECT_KEY: &str = "zoohelp/profile-avatars/image/018f-avatar.jpg";
+
+    #[test]
+    fn accepts_cloudinary_url_with_a_version_segment() {
+        assert!(is_cloudinary_delivery_url(
+            "https://res.cloudinary.com/limpeja/image/upload/v1750000000/zoohelp/profile-avatars/image/018f-avatar.jpg",
+            CLOUD_NAME,
+            OBJECT_KEY,
+        ));
+    }
+
+    #[test]
+    fn accepts_cloudinary_url_with_delivery_transformations() {
+        assert!(is_cloudinary_delivery_url(
+            "https://res.cloudinary.com/LIMPEJA/image/upload/c_fill,w_256/v1750000000/zoohelp/profile-avatars/image/018f-avatar.jpg",
+            CLOUD_NAME,
+            OBJECT_KEY,
+        ));
+    }
+
+    #[test]
+    fn rejects_a_different_cloudinary_asset() {
+        assert!(!is_cloudinary_delivery_url(
+            "https://res.cloudinary.com/limpeja/image/upload/v1750000000/zoohelp/profile-avatars/image/other.jpg",
+            CLOUD_NAME,
+            OBJECT_KEY,
+        ));
+    }
 }
