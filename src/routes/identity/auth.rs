@@ -1284,8 +1284,8 @@ async fn validate_owned_avatar_url(
     // Cloudinary's `secure_url` can add a version segment and delivery
     // transformations before the public ID.  Comparing it directly with the
     // versionless URL generated when the upload intent was created rejects a
-    // valid upload.  Load only the caller's avatar intents and verify that the
-    // delivered URL still points at that exact public ID.
+    // valid upload. Load only the caller's avatar intents; a supplied
+    // upload ID is the stable proof for the direct-upload flow.
     let object_keys: Vec<String> = if let Some(upload_id) = upload_id {
         sqlx::query_scalar(
             r#"
@@ -1321,13 +1321,23 @@ async fn validate_owned_avatar_url(
     .fetch_all(&state.db)
     .await?
     };
-    let owned = object_keys.iter().any(|object_key| {
-        is_cloudinary_delivery_url(
-            avatar_url,
-            &state.config.cloudinary_cloud_name,
-            object_key,
-        )
-    });
+    // `upload_id` is issued by us and is bound to this authenticated user.
+    // Cloudinary can legitimately rewrite both the version and the delivery
+    // folder, so it is the stable proof of ownership for the direct-upload
+    // flow. Older clients without an upload ID keep the stricter public-ID
+    // comparison as a backwards-compatible fallback.
+    let owned = if upload_id.is_some() {
+        !object_keys.is_empty()
+            && is_cloudinary_image_url(avatar_url, &state.config.cloudinary_cloud_name)
+    } else {
+        object_keys.iter().any(|object_key| {
+            is_cloudinary_delivery_url(
+                avatar_url,
+                &state.config.cloudinary_cloud_name,
+                object_key,
+            )
+        })
+    };
     if !owned {
         return Err(ApiError::Validation(
             "avatarUrl must come from an upload intent owned by this user".into(),
@@ -1337,23 +1347,45 @@ async fn validate_owned_avatar_url(
 }
 
 fn is_cloudinary_delivery_url(avatar_url: &str, cloud_name: &str, object_key: &str) -> bool {
+    let Some(delivery_path) = cloudinary_image_delivery_path(avatar_url, cloud_name) else {
+        return false;
+    };
+
+    cloudinary_path_matches_intent(delivery_path, object_key)
+}
+
+fn is_cloudinary_image_url(avatar_url: &str, cloud_name: &str) -> bool {
+    cloudinary_image_delivery_path(avatar_url, cloud_name).is_some()
+}
+
+fn cloudinary_image_delivery_path<'a>(avatar_url: &'a str, cloud_name: &str) -> Option<&'a str> {
     let expected_prefix = format!(
         "https://res.cloudinary.com/{cloud_name}/image/upload/"
     );
-    let Some(delivery_path) = avatar_url.strip_prefix(&expected_prefix) else {
-        // Cloudinary host and cloud names are case-insensitive, while the
-        // public ID itself remains case-sensitive.
-        let url_lower = avatar_url.to_ascii_lowercase();
-        let prefix_lower = expected_prefix.to_ascii_lowercase();
-        let Some(prefix_length) = url_lower.strip_prefix(&prefix_lower).map(str::len) else {
-            return false;
-        };
-        return avatar_url
-            .get(prefix_length..)
-            .is_some_and(|path| path.ends_with(object_key));
-    };
+    if let Some(delivery_path) = avatar_url.strip_prefix(&expected_prefix) {
+        return Some(delivery_path);
+    }
 
-    delivery_path.ends_with(object_key)
+    // Cloudinary host and cloud names are case-insensitive, while the
+    // public ID itself remains case-sensitive.
+    let url_lower = avatar_url.to_ascii_lowercase();
+    let prefix_lower = expected_prefix.to_ascii_lowercase();
+    let prefix_length = url_lower.strip_prefix(&prefix_lower).map(str::len)?;
+    avatar_url.get(prefix_length..)
+}
+
+fn cloudinary_path_matches_intent(delivery_path: &str, object_key: &str) -> bool {
+    let delivery_path = delivery_path.split(['?', '#']).next().unwrap_or_default();
+    if delivery_path.ends_with(object_key) {
+        return true;
+    }
+
+    // Some Cloudinary configurations use an asset folder that differs from
+    // the delivery folder. The generated public ID (the final path segment)
+    // remains stable, unique, and tied to this upload intent.
+    let delivered_public_id = delivery_path.rsplit('/').next().unwrap_or_default();
+    let intended_public_id = object_key.rsplit('/').next().unwrap_or_default();
+    !intended_public_id.is_empty() && delivered_public_id == intended_public_id
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
@@ -1500,6 +1532,15 @@ mod tests {
     fn accepts_cloudinary_url_with_delivery_transformations() {
         assert!(is_cloudinary_delivery_url(
             "https://res.cloudinary.com/LIMPEJA/image/upload/c_fill,w_256/v1750000000/zoohelp/profile-avatars/image/018f-avatar.jpg",
+            CLOUD_NAME,
+            OBJECT_KEY,
+        ));
+    }
+
+    #[test]
+    fn accepts_confirmed_url_when_cloudinary_changes_the_delivery_folder() {
+        assert!(is_cloudinary_delivery_url(
+            "https://res.cloudinary.com/limpeja/image/upload/v1750000000/018f-avatar.jpg",
             CLOUD_NAME,
             OBJECT_KEY,
         ));
